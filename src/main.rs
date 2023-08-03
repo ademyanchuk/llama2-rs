@@ -1,6 +1,7 @@
+use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
+use std::fs::File;
 use std::io::prelude::*;
-use std::{error::Error, fs::File};
 
 use ndarray::{Array, Array2, Dim, IxDynImpl, Zip};
 pub struct Embedding {
@@ -45,9 +46,9 @@ impl Embedding {
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     // Open the file
-    let mut f = File::open("model.bin")?;
+    let mut f = File::open("stories15M.bin")?;
     let mut buffer = [0; 28]; // 7 integers * 4 bytes each
 
     // Read the first 28 bytes (header)
@@ -62,6 +63,8 @@ fn main() {
     let n_kv_heads = cursor.read_i32::<LittleEndian>()?;
     let vocab_size = cursor.read_i32::<LittleEndian>()?;
     let max_seq_len = cursor.read_i32::<LittleEndian>()?;
+    println!("dim: {}, hidden_dim: {}, n_layers: {}, n_heads: {}, n_kv_heads: {}, vocab_size: {}, max_seq_len: {}", dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len);
+    Ok(())
 }
 
 #[cfg(test)]
