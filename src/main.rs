@@ -1,5 +1,8 @@
-use ndarray::parallel::prelude::*;
-use ndarray::{Array, Array2, Axis, Dim, IxDynImpl, Zip};
+use byteorder::{LittleEndian, ReadBytesExt};
+use std::io::prelude::*;
+use std::{error::Error, fs::File};
+
+use ndarray::{Array, Array2, Dim, IxDynImpl, Zip};
 pub struct Embedding {
     weight: Array2<f32>,
 }
@@ -43,7 +46,22 @@ impl Embedding {
 }
 
 fn main() {
-    println!("Hello, world!");
+    // Open the file
+    let mut f = File::open("model.bin")?;
+    let mut buffer = [0; 28]; // 7 integers * 4 bytes each
+
+    // Read the first 28 bytes (header)
+    f.read_exact(&mut buffer)?;
+
+    // Convert bytes to integers
+    let mut cursor = std::io::Cursor::new(buffer);
+    let dim = cursor.read_i32::<LittleEndian>()?;
+    let hidden_dim = cursor.read_i32::<LittleEndian>()?;
+    let n_layers = cursor.read_i32::<LittleEndian>()?;
+    let n_heads = cursor.read_i32::<LittleEndian>()?;
+    let n_kv_heads = cursor.read_i32::<LittleEndian>()?;
+    let vocab_size = cursor.read_i32::<LittleEndian>()?;
+    let max_seq_len = cursor.read_i32::<LittleEndian>()?;
 }
 
 #[cfg(test)]
@@ -107,8 +125,45 @@ mod tests {
         let embedding = Embedding::new(weight_data, num_embeddings, embedding_dim);
 
         let input_data = vec![1usize, 3, 4];
-        let input = Array::from_shape_vec((input_data.len(),), input_data).unwrap();
-        let output = embedding.forward(ndarray::ArrayD::from(input));
-        assert_eq!(output.dim(), (input.dim(), embedding_dim));
+        let input_len = input_data.len();
+        let input = Array::from_shape_vec(ndarray::IxDyn(&[input_len]), input_data).unwrap();
+        let output = embedding.forward(input);
+        assert_eq!(output.dim(), ndarray::IxDyn(&[input_len, embedding_dim]));
+    }
+    #[test]
+    fn test_embedding_forward_values() {
+        let num_embeddings = 5;
+        let embedding_dim = 3;
+        let weight_data = vec![
+            0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
+        ];
+        let embedding = Embedding::new(weight_data, num_embeddings, embedding_dim);
+
+        let input = Array::from_shape_vec(ndarray::IxDyn(&[3]), vec![1usize, 3, 4]).unwrap();
+        let output = embedding.forward(input.clone());
+
+        let expected_output = Array::from_shape_vec(
+            ndarray::IxDyn(&[3, embedding_dim]),
+            vec![3.0, 4.0, 5.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0],
+        )
+        .unwrap();
+        assert_eq!(output, expected_output);
+    }
+    #[test]
+    fn test_embedding_forward_shape_2d() {
+        let num_embeddings = 5;
+        let embedding_dim = 3;
+        let weight_data = vec![0.0; num_embeddings * embedding_dim];
+        let embedding = Embedding::new(weight_data, num_embeddings, embedding_dim);
+
+        let input_data = vec![1usize, 3, 4, 2, 0, 1];
+        let rows = 2;
+        let cols = input_data.len() / rows;
+        let input =
+            ndarray::Array::from_shape_vec(ndarray::IxDyn(&[rows, cols]), input_data).unwrap();
+
+        let output = embedding.forward(input.clone());
+
+        assert_eq!(output.dim(), ndarray::IxDyn(&[rows, cols, embedding_dim]));
     }
 }
