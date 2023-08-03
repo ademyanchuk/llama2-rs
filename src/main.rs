@@ -3,7 +3,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use std::fs::File;
 use std::io::prelude::*;
 
-use ndarray::{Array, Array2, Dim, IxDynImpl, Zip};
+use ndarray::{Array, Array2, Dim, IxDynImpl, Zip, s};
 pub struct Embedding {
     weight: Array2<f32>,
 }
@@ -64,6 +64,22 @@ fn main() -> Result<()> {
     let vocab_size = cursor.read_i32::<LittleEndian>()?;
     let max_seq_len = cursor.read_i32::<LittleEndian>()?;
     println!("dim: {}, hidden_dim: {}, n_layers: {}, n_heads: {}, n_kv_heads: {}, vocab_size: {}, max_seq_len: {}", dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len);
+
+    let n_weights = vocab_size * dim;
+    let mut buffer = vec![0; n_weights as usize * 4]; // 4 bytes per float
+
+    // Read the appropriate number of bytes from the file.
+    f.read_exact(&mut buffer)?;
+
+    // Convert bytes to floats
+    let mut cursor = std::io::Cursor::new(buffer);
+    let mut emb_weights = Vec::new();
+    for _ in 0..n_weights {
+        let weight = cursor.read_f32::<LittleEndian>()?;
+        emb_weights.push(weight);
+    }
+    let tok_embedding = Embedding::new(emb_weights, vocab_size as usize, dim as usize);
+    println!("{}", tok_embedding.weight.slice(s![..3, ..5]));
     Ok(())
 }
 
