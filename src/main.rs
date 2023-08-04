@@ -3,7 +3,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use std::fs::File;
 use std::io::prelude::*;
 
-use ndarray::{Array, Array2, Dim, IxDynImpl, Zip, s};
+use ndarray::{s, Array, Array1, Array2, Dim, IxDynImpl, Zip};
 pub struct Embedding {
     weight: Array2<f32>,
 }
@@ -43,6 +43,64 @@ impl Embedding {
         // }
 
         output
+    }
+}
+
+pub struct Linear {
+    weight: Array2<f32>,
+    bias: Option<Array1<f32>>,
+    in_features: usize,
+    out_features: usize,
+}
+
+impl Linear {
+    pub fn new(
+        weight_data: Vec<f32>,
+        bias_data: Option<Vec<f32>>,
+        in_features: usize,
+        out_features: usize,
+    ) -> Linear {
+        let weight = Array2::from_shape_vec((out_features, in_features), weight_data)
+            .expect("Data shape does not match the linear weight dimensions");
+        let bias = bias_data.map(|bias_vec| {
+            Array1::from_shape_vec(out_features, bias_vec)
+                .expect("Data shape does not match the linear bias dimensions")
+        });
+        Linear {
+            weight,
+            bias,
+            in_features,
+            out_features,
+        }
+    }
+    pub fn forward<T: ndarray::Dimension<Larger = Dim<IxDynImpl>>>(
+        &self,
+        input: Array<f32, T>,
+    ) -> Array<f32, T::Larger> {
+        // check dimensions, panic if not correct
+        if input.shape().last().unwrap_or(&0) != &self.in_features {
+            panic!("The last dimension of the input must be equal to in_features");
+        }
+        // build input shape
+        let original_shape = input.shape().to_vec();
+        // compute output on flattened input
+        let flattened_input = input
+            .into_shape((
+                original_shape.iter().rev().skip(1).product(), // takes all but last shapes and multiplies them
+                self.in_features,
+            ))
+            .unwrap();
+
+        let mut output = flattened_input.dot(&self.weight.t());
+        if let Some(bias) = &self.bias {
+            output += bias;
+        }
+        // reshape to the final output shape
+        let mut output_shape = original_shape.clone();
+        let last_ix = output_shape.len() - 1;
+        output_shape[last_ix] = self.out_features;
+        let reshaped_output = output.into_shape(output_shape).unwrap();
+        reshaped_output
     }
 }
 
@@ -184,5 +242,32 @@ mod tests {
         let output = embedding.forward(input.clone());
 
         assert_eq!(output.dim(), ndarray::IxDyn(&[rows, cols, embedding_dim]));
+    }
+    #[test]
+    fn test_linear_new_with_bias() {
+        let weight_data = vec![1.0, 2.0, 3.0, 4.0];
+        let bias_data = vec![0.1, 0.2];
+        let linear = Linear::new(weight_data.clone(), Some(bias_data.clone()), 2, 2);
+
+        assert_eq!(
+            linear.weight,
+            Array2::from_shape_vec((2, 2), weight_data).unwrap()
+        );
+        assert_eq!(
+            linear.bias.unwrap(),
+            Array1::from_shape_vec((2,), bias_data).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_linear_new_without_bias() {
+        let weight_data = vec![1.0, 2.0, 3.0, 4.0];
+        let linear = Linear::new(weight_data.clone(), None, 2, 2);
+
+        assert_eq!(
+            linear.weight,
+            Array2::from_shape_vec((2, 2), weight_data).unwrap()
+        );
+        assert!(linear.bias.is_none());
     }
 }
