@@ -1,9 +1,8 @@
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
+use ndarray::{s, Array, Array1, Array2, Dim, IxDynImpl, Zip};
 use std::fs::File;
 use std::io::prelude::*;
-
-use ndarray::{s, Array, Array1, Array2, Dim, IxDynImpl, Zip};
 pub struct Embedding {
     weight: Array2<f32>,
 }
@@ -96,11 +95,10 @@ impl Linear {
             output += bias;
         }
         // reshape to the final output shape
-        let mut output_shape = original_shape.clone();
+        let mut output_shape = original_shape;
         let last_ix = output_shape.len() - 1;
         output_shape[last_ix] = self.out_features;
-        let reshaped_output = output.into_shape(output_shape).unwrap();
-        reshaped_output
+        output.into_shape(output_shape).unwrap()
     }
 }
 
@@ -144,6 +142,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::*;
 
     #[test]
     fn test_new_with_valid_inputs() {
@@ -236,8 +235,7 @@ mod tests {
         let input_data = vec![1usize, 3, 4, 2, 0, 1];
         let rows = 2;
         let cols = input_data.len() / rows;
-        let input =
-            ndarray::Array::from_shape_vec(ndarray::IxDyn(&[rows, cols]), input_data).unwrap();
+        let input = Array::from_shape_vec(ndarray::IxDyn(&[rows, cols]), input_data).unwrap();
 
         let output = embedding.forward(input.clone());
 
@@ -269,5 +267,55 @@ mod tests {
             Array2::from_shape_vec((2, 2), weight_data).unwrap()
         );
         assert!(linear.bias.is_none());
+    }
+    #[test]
+    fn test_linear_2d_input_no_bias() {
+        let in_features = 3;
+        let out_features = 2;
+        let weight = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // shape [2, 3]
+        let linear = Linear::new(weight, None, in_features, out_features);
+        let input =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+                .unwrap();
+        let output = linear.forward(input);
+        let expected_output =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![14.0, 32.0, 32.0, 77.0]).unwrap(); // shape [2, 2]
+        assert_abs_diff_eq!(output, expected_output, epsilon = 1e-6);
+    }
+    #[test]
+    fn test_linear_2d_input_with_bias() {
+        let in_features = 3;
+        let out_features = 2;
+        let weight = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // shape [2, 3]
+        let bias = vec![0.5, -0.5];
+        let linear = Linear::new(weight, Some(bias), in_features, out_features);
+        let input =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+                .unwrap();
+        let output = linear.forward(input);
+        let expected_output =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![14.5, 31.5, 32.5, 76.5]).unwrap(); // shape [2, 2]
+        assert_abs_diff_eq!(output, expected_output, epsilon = 1e-6);
+    }
+    #[test]
+    fn test_linear_3d_input_no_bias() {
+        let in_features = 3;
+        let out_features = 2;
+        let weight = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // shape [2, 3]
+        let linear = Linear::new(weight, None, in_features, out_features);
+        let input = Array::from_shape_vec(
+            ndarray::IxDyn(&[2, 2, 3]),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+        )
+        .unwrap();
+        let output = linear.forward(input);
+        let expected_output = Array::from_shape_vec(
+            ndarray::IxDyn(&[2, 2, 2]),
+            vec![14.0, 32.0, 32.0, 77.0, 50.0, 122.0, 68.0, 167.0],
+        )
+        .unwrap(); // shape [2, 2, 2]
+        assert_abs_diff_eq!(output, expected_output, epsilon = 1e-6);
     }
 }
