@@ -1,6 +1,6 @@
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
-use ndarray::{s, Array, Array1, Array2, Dim, IxDynImpl, Zip};
+use ndarray::{s, Array, Array1, Array2, Axis, Dim, IxDynImpl, Zip};
 use std::fs::File;
 use std::io::prelude::*;
 pub struct Embedding {
@@ -101,6 +101,41 @@ impl Linear {
         output.into_shape(output_shape).unwrap()
     }
 }
+pub struct RMSNorm {
+    weight: Array1<f32>,
+    eps: f32,
+}
+impl RMSNorm {
+    pub fn new(dim: usize, eps: f32, weight_data: Vec<f32>) -> RMSNorm {
+        let weight = Array1::from_shape_vec((dim,), weight_data)
+            .expect("RMSNorm data shape does not match the weight dimensions");
+        RMSNorm { weight, eps }
+    }
+    pub fn forward<T: ndarray::Dimension<Larger = Dim<IxDynImpl>> + ndarray::RemoveAxis>(
+        &self,
+        mut input: Array<f32, T>,
+    ) -> Array<f32, T> {
+        if input.shape().last().unwrap_or(&0) != self.weight.shape().last().unwrap() {
+            panic!("The last dimension of the input must be equal to dimension of RMSNorm weight");
+        }
+        // prep dims
+        let last_idx = input.ndim() - 1;
+        let mut mean_shape = input.shape().to_vec();
+        mean_shape[last_idx] = 1;
+
+        // compute the mean of squares across the last dimension
+        let mean = (&input * &input).mean_axis(Axis(input.ndim() - 1)).unwrap();
+        let mut mean = mean.into_shape(mean_shape).unwrap(); // keep dim == True
+        mean += self.eps; // add epsilon for numerical stability
+
+        // compute the reciprocal square-root
+        mean.mapv_inplace(|v| v.sqrt().recip());
+        // normalize the input
+        input *= &mean;
+        input *= &self.weight;
+        input
+    }
+}
 
 fn main() -> Result<()> {
     // Open the file
@@ -143,6 +178,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use approx::*;
+    use ndarray::arr1;
 
     #[test]
     fn test_new_with_valid_inputs() {
@@ -317,5 +353,41 @@ mod tests {
         )
         .unwrap(); // shape [2, 2, 2]
         assert_abs_diff_eq!(output, expected_output, epsilon = 1e-6);
+    }
+    #[test]
+    fn test_rmsnorm_new() {
+        // create an instance of RMSNorm
+        let norm = RMSNorm::new(4, 0.01, vec![1.0, 1.0, 1.0, 1.0]);
+
+        // check that the properties were correctly set
+        assert_eq!(norm.eps, 0.01);
+        assert_eq!(norm.weight, arr1(&[1.0, 1.0, 1.0, 1.0]));
+    }
+    #[test]
+    fn test_rmsnorm_forward() {
+        let rms_norm = RMSNorm::new(3, 1e-5, vec![1.0, 1.0, 1.0]);
+
+        let input =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+                .unwrap();
+        let output = rms_norm.forward(input);
+
+        let expected_output = Array::from_shape_vec(
+            ndarray::IxDyn(&[2, 3]),
+            vec![0.4629, 0.9258, 1.3887, 0.7895, 0.9869, 1.1843],
+        )
+        .unwrap();
+
+        assert_abs_diff_eq!(output, expected_output, epsilon = 1e-4);
+    }
+    #[test]
+    #[should_panic(
+        expected = "The last dimension of the input must be equal to dimension of RMSNorm weight"
+    )]
+    fn rmsnorm_forward_panic_test() {
+        let rmsnorm = RMSNorm::new(3, 1e-5, vec![1.0, 1.0, 1.0]);
+        let input =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![1.0, 2.0, 4.0, 5.0]).unwrap();
+        let _ = rmsnorm.forward(input);
     }
 }
