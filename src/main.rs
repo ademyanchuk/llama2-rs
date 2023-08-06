@@ -3,6 +3,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{s, Array, Array1, Array2, Axis, Dim, IxDynImpl, Zip};
 use std::fs::File;
 use std::io::prelude::*;
+// Layers
 pub struct Embedding {
     weight: Array2<f32>,
 }
@@ -135,6 +136,15 @@ impl RMSNorm {
         input *= &self.weight;
         input
     }
+}
+// Functions
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+pub fn silu_inplace<T: ndarray::Dimension>(mut input: Array<f32, T>) -> Array<f32, T> {
+    input.mapv_inplace(|x| x * sigmoid(x));
+    input
 }
 
 fn main() -> Result<()> {
@@ -389,5 +399,22 @@ mod tests {
         let input =
             Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![1.0, 2.0, 4.0, 5.0]).unwrap();
         let _ = rmsnorm.forward(input);
+    }
+    #[test]
+    fn test_silu_inplace() {
+        let input = Array2::from_shape_vec(
+            (2, 3),
+            vec![0.3659, -1.6326, -0.5668, -0.7105, 0.7709, 0.1407],
+        )
+        .unwrap();
+        let expected_output = Array2::from_shape_vec(
+            (2, 3),
+            vec![0.2161, -0.2669, -0.2052, -0.2341, 0.5271, 0.0753],
+        )
+        .unwrap();
+
+        let output = silu_inplace(input);
+
+        assert_abs_diff_eq!(output, expected_output, epsilon = 1e-4);
     }
 }
