@@ -4,6 +4,34 @@ use ndarray::{s, Array, Array1, Array2, Axis, Dim, IxDynImpl, Zip};
 use std::fs::File;
 use std::io::prelude::*;
 
+pub struct ModelArgs {
+    pub dim: usize,
+    pub n_layers: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: Option<usize>,
+    pub vocab_size: isize,
+    pub multiple_of: usize,
+    pub norm_eps: f32,
+    pub max_seq_len: usize,
+    pub dropout: f32,
+}
+
+impl Default for ModelArgs {
+    fn default() -> Self {
+        ModelArgs {
+            dim: 4096,
+            n_layers: 32,
+            n_heads: 32,
+            n_kv_heads: None,
+            vocab_size: -1,
+            multiple_of: 256,
+            norm_eps: 1e-5,
+            max_seq_len: 2048,
+            dropout: 0.0,
+        }
+    }
+}
+
 // Blocks
 pub struct FeedForward {
     w1: Linear,
