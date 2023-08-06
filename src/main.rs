@@ -3,6 +3,45 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{s, Array, Array1, Array2, Axis, Dim, IxDynImpl, Zip};
 use std::fs::File;
 use std::io::prelude::*;
+
+// Blocks
+pub struct FeedForward {
+    w1: Linear,
+    w2: Linear,
+    w3: Linear,
+}
+
+impl FeedForward {
+    pub fn new(
+        in_dim: usize,
+        hidden_dim: usize,
+        multiple_of: usize,
+        w1_weights: Vec<f32>,
+        w2_weights: Vec<f32>,
+        w3_weights: Vec<f32>,
+    ) -> FeedForward {
+        let hidden_dim = 2 * hidden_dim / 3;
+        let hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) / multiple_of);
+
+        let w1 = Linear::new(w1_weights, None, in_dim, hidden_dim);
+        let w2 = Linear::new(w2_weights, None, hidden_dim, in_dim);
+        let w3 = Linear::new(w3_weights, None, in_dim, hidden_dim);
+
+        FeedForward { w1, w2, w3 }
+    }
+
+    pub fn forward<T: ndarray::Dimension<Larger = Dim<IxDynImpl>>>(
+        &self,
+        input: Array<f32, T>,
+    ) -> Array<f32, T::Larger> {
+        let x1 = self.w1.forward(&input);
+        let x1 = silu_inplace(x1);
+        let x2 = self.w3.forward(&input);
+        let result = x1 * x2;
+        self.w2.forward(&result)
+    }
+}
+
 // Layers
 pub struct Embedding {
     weight: Array2<f32>,
@@ -75,7 +114,7 @@ impl Linear {
     }
     pub fn forward<T: ndarray::Dimension<Larger = Dim<IxDynImpl>>>(
         &self,
-        input: Array<f32, T>,
+        input: &Array<f32, T>,
     ) -> Array<f32, T::Larger> {
         // check dimensions, panic if not correct
         if input.shape().last().unwrap_or(&0) != &self.in_features {
@@ -85,6 +124,7 @@ impl Linear {
         let original_shape = input.shape().to_vec();
         // compute output on flattened input
         let flattened_input = input
+            .view()
             .into_shape((
                 original_shape.iter().rev().skip(1).product(), // takes all but last shapes and multiplies them
                 self.in_features,
@@ -323,7 +363,7 @@ mod tests {
         let input =
             Array::from_shape_vec(ndarray::IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
                 .unwrap();
-        let output = linear.forward(input);
+        let output = linear.forward(&input);
         let expected_output =
             Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![14.0, 32.0, 32.0, 77.0]).unwrap(); // shape [2, 2]
         assert_abs_diff_eq!(output, expected_output, epsilon = 1e-6);
@@ -338,7 +378,7 @@ mod tests {
         let input =
             Array::from_shape_vec(ndarray::IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
                 .unwrap();
-        let output = linear.forward(input);
+        let output = linear.forward(&input);
         let expected_output =
             Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![14.5, 31.5, 32.5, 76.5]).unwrap(); // shape [2, 2]
         assert_abs_diff_eq!(output, expected_output, epsilon = 1e-6);
@@ -356,7 +396,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let output = linear.forward(input);
+        let output = linear.forward(&input);
         let expected_output = Array::from_shape_vec(
             ndarray::IxDyn(&[2, 2, 2]),
             vec![14.0, 32.0, 32.0, 77.0, 50.0, 122.0, 68.0, 167.0],
@@ -416,5 +456,38 @@ mod tests {
         let output = silu_inplace(input);
 
         assert_abs_diff_eq!(output, expected_output, epsilon = 1e-4);
+    }
+    #[test]
+    fn test_feedforward() {
+        // 1. Initialize FeedForward with predefined weights (came from PyTorch implementation)
+        let w1_weights = vec![
+            -0.4764, 0.0453, 0.1539, 0.0752, -0.2386, 0.3814, 0.1513, -0.3863, 0.4562, 0.2769,
+            0.4002, -0.1647,
+        ];
+        let w2_weights = vec![
+            0.2170, 0.3585, -0.2992, 0.3554, -0.4850, 0.2447, 0.1820, 0.2602, 0.0146, 0.1802,
+            -0.4978, -0.0919,
+        ];
+        let w3_weights = vec![
+            -0.4622, -0.5098, 0.4391, 0.4349, -0.4857, 0.3582, 0.2414, 0.3671, 0.2596, 0.2129,
+            0.0142, 0.1426,
+        ];
+        let feed_forward = FeedForward::new(3, 4, 4, w1_weights, w2_weights, w3_weights);
+
+        // 2. Provide it with a predefined input
+        let input = Array::from_shape_vec(
+            ndarray::IxDyn(&[2, 3]),
+            vec![0.0874, -0.7098, -1.6503, -0.5212, -1.3321, -0.5542],
+        )
+        .unwrap();
+
+        // 3. Get the result and compare it with expected output.
+        let result = feed_forward.forward(input);
+        let expected_output = Array::from_shape_vec(
+            ndarray::IxDyn(&[2, 3]),
+            vec![-0.0112, 0.0036, -0.0521, 0.0489, -0.0182, 0.0356],
+        )
+        .unwrap();
+        assert_abs_diff_eq!(result, expected_output, epsilon = 1e-4);
     }
 }
