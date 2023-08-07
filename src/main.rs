@@ -1,6 +1,6 @@
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
-use ndarray::{s, Array, Array1, Array2, Axis, Dim, IxDynImpl, Zip};
+use ndarray::{s, Array, Array1, Array2, ArrayD, ArrayView, Axis, Dim, IxDyn, IxDynImpl, Zip};
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -213,6 +213,37 @@ fn sigmoid(x: f32) -> f32 {
 pub fn silu_inplace<T: ndarray::Dimension>(mut input: Array<f32, T>) -> Array<f32, T> {
     input.mapv_inplace(|x| x * sigmoid(x));
     input
+}
+
+fn reshape_for_broadcast<'a>(
+    freqs_cis: &'a Array2<f32>,
+    x: &ArrayD<f32>,
+) -> ArrayView<'a, f32, IxDyn> {
+    // Ensure the shape of freqs_cis matches the second and last dimension of x
+    assert!(x.ndim() > 2);
+    assert_eq!(
+        freqs_cis.shape(),
+        &[x.shape()[1], *x.shape().last().unwrap()]
+    );
+
+    // Calculate the new shape
+    let shape: Vec<usize> = x
+        .shape()
+        .iter()
+        .enumerate()
+        .map(
+            |(i, &dim)| {
+                if i == 1 || i == x.ndim() - 1 {
+                    dim
+                } else {
+                    1
+                }
+            },
+        )
+        .collect();
+
+    // Reshape freqs_cis and return
+    freqs_cis.view().into_shape(shape).unwrap()
 }
 
 fn main() -> Result<()> {
@@ -517,5 +548,39 @@ mod tests {
         )
         .unwrap();
         assert_abs_diff_eq!(result, expected_output, epsilon = 1e-4);
+    }
+    #[test]
+    fn test_reshape_for_broadcast_shapes() {
+        let x = Array::ones(vec![3, 5, 6]);
+        let freqs_cis = Array2::<f32>::ones((5, 6));
+
+        let reshaped = reshape_for_broadcast(&freqs_cis, &x);
+        assert_eq!(reshaped.shape(), &[1, 5, 6]);
+    }
+    #[test]
+    #[should_panic]
+    fn test_reshape_for_broadcast_panic_dim() {
+        let x = Array::ones(vec![5, 6]); // x has only 2 dimensions
+        let freqs_cis = Array2::<f32>::ones((5, 6));
+
+        let _ = reshape_for_broadcast(&freqs_cis, &x);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_reshape_for_broadcast_panic_shape_mismatch_1() {
+        let x = Array::ones(vec![3, 4, 6]); // Second dimension doesn't match
+        let freqs_cis = Array2::<f32>::ones((5, 6));
+
+        let _ = reshape_for_broadcast(&freqs_cis, &x);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_reshape_for_broadcast_panic_shape_mismatch_last() {
+        let x = Array::ones(vec![3, 5, 7]); // Last dimension doesn't match
+        let freqs_cis = Array2::<f32>::ones((5, 6));
+
+        let _ = reshape_for_broadcast(&freqs_cis, &x);
     }
 }
