@@ -215,35 +215,90 @@ pub fn silu_inplace<T: ndarray::Dimension>(mut input: Array<f32, T>) -> Array<f3
     input
 }
 
-fn reshape_for_broadcast<'a>(
-    freqs_cis: &'a Array2<f32>,
-    x: &ArrayD<f32>,
-) -> ArrayView<'a, f32, IxDyn> {
-    // Ensure the shape of freqs_cis matches the second and last dimension of x
-    assert!(x.ndim() > 2);
-    assert_eq!(
-        freqs_cis.shape(),
-        &[x.shape()[1], *x.shape().last().unwrap()]
-    );
+fn reshape_for_broadcast(x_shape: &[usize], freq_shape: &[usize]) -> Vec<usize> {
+    // Assert the shapes to ensure compatibility
+    assert!(x_shape.len() > 2);
+    assert_eq!(freq_shape[0], x_shape[1]);
+    assert_eq!(freq_shape[1], *x_shape.last().unwrap());
 
-    // Calculate the new shape
-    let shape: Vec<usize> = x
-        .shape()
+    x_shape
         .iter()
         .enumerate()
-        .map(
-            |(i, &dim)| {
-                if i == 1 || i == x.ndim() - 1 {
-                    dim
-                } else {
-                    1
-                }
-            },
-        )
-        .collect();
+        .map(|(i, &dim)| {
+            if i == 1 || i == x_shape.len() - 1 {
+                dim
+            } else {
+                1
+            }
+        })
+        .collect()
+}
 
-    // Reshape freqs_cis and return
-    freqs_cis.view().into_shape(shape).unwrap()
+fn reshape_to_complex(tensor: &Array<f32, IxDyn>) -> ArrayView<'_, f32, IxDyn> {
+    let mut new_shape: Vec<usize> = tensor.shape().to_vec();
+
+    // The last dimension is reshaped to become two dimensions: [n/2, 2]
+    let last_dim = new_shape.pop().unwrap();
+    new_shape.push(last_dim / 2);
+    new_shape.push(2);
+
+    tensor.view().into_shape(new_shape).unwrap()
+}
+
+fn apply_rotary_emb(
+    xq: &ArrayD<f32>,
+    xk: &ArrayD<f32>,
+    freqs_cos: &Array2<f32>,
+    freqs_sin: &Array2<f32>,
+) -> (ArrayD<f32>, ArrayD<f32>) {
+    // Reshape xq and xk to match the complex representation
+    let xq_view = reshape_to_complex(xq);
+    let xk_view = reshape_to_complex(xk);
+
+    let xq_r = xq_view.index_axis(Axis(xq_view.ndim() - 1), 0);
+    let xq_i = xq_view.index_axis(Axis(xq_view.ndim() - 1), 1);
+
+    let xk_r = xk_view.index_axis(Axis(xk_view.ndim() - 1), 0);
+    let xk_i = xk_view.index_axis(Axis(xk_view.ndim() - 1), 1);
+
+    // Reshape freqs_cos and freqs_sin for broadcasting
+    let new_shape_cos = reshape_for_broadcast(xq_r.shape(), freqs_cos.shape());
+    let reshaped_freqs_cos = freqs_cos.view().into_shape(new_shape_cos).unwrap();
+
+    let new_shape_sin = reshape_for_broadcast(xq_i.shape(), freqs_sin.shape());
+    let reshaped_freqs_sin = freqs_sin.view().into_shape(new_shape_sin).unwrap();
+
+    // Apply rotation using real numbers
+    let xq_out_r = &xq_r * &reshaped_freqs_cos - &xq_i * &reshaped_freqs_sin;
+    let xq_out_i = &xq_r * &reshaped_freqs_sin + &xq_i * &reshaped_freqs_cos;
+
+    let xk_out_r = &xk_r * &reshaped_freqs_cos - &xk_i * &reshaped_freqs_sin;
+    let xk_out_i = &xk_r * &reshaped_freqs_sin + &xk_i * &reshaped_freqs_cos;
+
+    // Flatten dimensions starting from 3d
+    let stacked = ndarray::stack(Axis(xq_out_r.ndim()), &[xq_out_r.view(), xq_out_i.view()])
+        .expect("stack works with equal dims");
+    let new_shape = stacked.shape().to_vec();
+    let last_dim = new_shape.iter().skip(3).product();
+    let mut new_shape: Vec<usize> = new_shape.into_iter().take(3).collect();
+    new_shape.push(last_dim);
+
+    let xq_out = stacked.into_shape(new_shape.as_slice()).unwrap();
+    println!("{:?}", xq_out);
+
+    let stacked = ndarray::stack(Axis(xk_out_r.ndim()), &[xk_out_r.view(), xk_out_i.view()])
+        .expect("stack works with equal dims");
+    let new_shape = stacked.shape().to_vec();
+    let last_dim = new_shape.iter().skip(3).product();
+    let mut new_shape: Vec<usize> = new_shape.into_iter().take(3).collect();
+    new_shape.push(last_dim);
+
+    let xk_out = stacked.into_shape(new_shape.as_slice()).unwrap();
+
+    (
+        xq_out.into_dimensionality::<IxDyn>().unwrap(),
+        xk_out.into_dimensionality::<IxDyn>().unwrap(),
+    )
 }
 
 fn main() -> Result<()> {
@@ -287,7 +342,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use approx::*;
-    use ndarray::arr1;
+    use ndarray::{arr1, ArrayD, ShapeBuilder};
 
     #[test]
     fn test_new_with_valid_inputs() {
@@ -551,36 +606,215 @@ mod tests {
     }
     #[test]
     fn test_reshape_for_broadcast_shapes() {
-        let x = Array::ones(vec![3, 5, 6]);
-        let freqs_cis = Array2::<f32>::ones((5, 6));
+        let x_shape = &[3, 5, 6];
+        let freq_shape = &[5, 6];
 
-        let reshaped = reshape_for_broadcast(&freqs_cis, &x);
-        assert_eq!(reshaped.shape(), &[1, 5, 6]);
+        let new_shape = reshape_for_broadcast(x_shape, freq_shape);
+        assert_eq!(new_shape, &[1, 5, 6]);
     }
     #[test]
     #[should_panic]
     fn test_reshape_for_broadcast_panic_dim() {
-        let x = Array::ones(vec![5, 6]); // x has only 2 dimensions
-        let freqs_cis = Array2::<f32>::ones((5, 6));
+        let x_shape = &[5, 6]; // only 2 dimensions
+        let freq_shape = &[5, 6];
 
-        let _ = reshape_for_broadcast(&freqs_cis, &x);
+        let _ = reshape_for_broadcast(x_shape, freq_shape);
     }
 
     #[test]
     #[should_panic]
     fn test_reshape_for_broadcast_panic_shape_mismatch_1() {
-        let x = Array::ones(vec![3, 4, 6]); // Second dimension doesn't match
-        let freqs_cis = Array2::<f32>::ones((5, 6));
+        let x_shape = &[3, 4, 6]; //second dimension doesn't match
+        let freq_shape = &[5, 6];
 
-        let _ = reshape_for_broadcast(&freqs_cis, &x);
+        let _ = reshape_for_broadcast(x_shape, freq_shape);
     }
 
     #[test]
     #[should_panic]
     fn test_reshape_for_broadcast_panic_shape_mismatch_last() {
-        let x = Array::ones(vec![3, 5, 7]); // Last dimension doesn't match
-        let freqs_cis = Array2::<f32>::ones((5, 6));
+        let x_shape = &[3, 5, 7]; // last dimension doesn't match
+        let freq_shape = &[5, 6];
 
-        let _ = reshape_for_broadcast(&freqs_cis, &x);
+        let _ = reshape_for_broadcast(x_shape, freq_shape);
+    }
+    #[test]
+    fn test_reshape_to_complex() {
+        let tensor = ArrayD::from_elem(IxDyn(&[2, 4]), 1.0f32);
+        let reshaped = reshape_to_complex(&tensor);
+        assert_eq!(reshaped.shape(), &[2, 2, 2]);
+
+        let tensor = ArrayD::from_elem(IxDyn(&[3, 6, 8]), 1.0f32);
+        let reshaped = reshape_to_complex(&tensor);
+        assert_eq!(reshaped.shape(), &[3, 6, 4, 2]);
+    }
+    #[test]
+    fn test_apply_rotary_emb_shapes() {
+        // Generate random input arrays with the specified shapes
+        let xq = ArrayD::from_shape_fn(vec![2, 5, 4, 8], |_| rand::random::<f32>());
+        let xk = ArrayD::from_shape_fn(vec![2, 5, 4, 8], |_| rand::random::<f32>());
+        let freqs_cos = Array2::from_shape_fn((5, 4), |_| rand::random::<f32>());
+        let freqs_sin = Array::from_shape_fn((5, 4), |_| rand::random::<f32>());
+
+        let (output_xq, output_xk) = apply_rotary_emb(&xq, &xk, &freqs_cos, &freqs_sin);
+
+        // Check shapes of the output arrays
+        assert_eq!(output_xq.shape(), &[2, 5, 4, 8]);
+        assert_eq!(output_xk.shape(), &[2, 5, 4, 8]);
+    }
+    #[test]
+    fn test_apply_rotary_emb_values() {
+        let xq = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[2, 3, 2, 4]),
+            vec![
+                -0.8394, -1.4532, -1.1078, 0.6352, 1.1605, 1.8578, -1.0871, -1.3556, 0.3745,
+                -1.3348, -1.8303, -1.7940, -0.1393, -0.8891, 0.8550, 0.6536, 1.3476, -1.7046,
+                -0.5971, -0.6485, -0.3225, 0.4260, -0.7996, 0.0668, 0.6275, -2.7466, 0.3128,
+                -0.0060, 0.1096, -0.3225, 0.4355, -1.3955, 0.6312, -0.1921, 1.6291, -0.4094,
+                0.7282, -0.2979, 0.3601, 1.0889, -1.1238, 0.8396, -0.1531, 0.3422, -1.1257, 0.0461,
+                -0.8512, 1.0879,
+            ],
+        )
+        .unwrap();
+        let xk = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[2, 3, 2, 4]),
+            vec![
+                2.6858e-01,
+                -1.1336e+00,
+                1.7634e+00,
+                6.3016e-01,
+                -2.3757e-01,
+                -1.0991e+00,
+                4.3722e-01,
+                8.3467e-01,
+                -1.0983e+00,
+                -8.2900e-02,
+                -8.3557e-02,
+                9.5412e-01,
+                8.1022e-01,
+                1.2607e-01,
+                -9.8301e-01,
+                -3.0040e-01,
+                5.7840e-01,
+                -2.3034e+00,
+                2.5555e+00,
+                1.2410e+00,
+                -6.8892e-01,
+                -4.0045e-01,
+                -1.3077e-01,
+                9.0362e-01,
+                5.1952e-01,
+                -1.4140e+00,
+                2.1658e-03,
+                -1.1250e+00,
+                -2.1708e+00,
+                5.1018e-01,
+                -1.1051e+00,
+                8.1955e-01,
+                -4.8645e-01,
+                6.7161e-01,
+                1.6593e+00,
+                2.0753e-01,
+                2.0263e+00,
+                1.1484e+00,
+                1.8454e+00,
+                2.6848e-01,
+                1.5497e-01,
+                1.0212e+00,
+                -5.1874e-02,
+                7.7246e-01,
+                5.1927e-01,
+                6.3070e-02,
+                -2.1352e-02,
+                -8.1618e-01,
+            ],
+        )
+        .unwrap();
+        let freqs_cos = Array2::from_shape_vec(
+            (3, 2),
+            vec![-0.1339, -1.4408, -0.7710, 0.4526, -3.0065, 2.3243],
+        )
+        .unwrap();
+        let freqs_sin = Array2::from_shape_vec(
+            (3, 2),
+            vec![0.3798, -1.3930, -0.0854, 0.7161, 2.4592, -1.0601],
+        )
+        .unwrap();
+        let xq_out_expected = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[2, 3, 2, 4]),
+            vec![
+                6.6427e-01,
+                -1.2423e-01,
+                2.4810e+00,
+                6.2798e-01,
+                -8.6092e-01,
+                1.9201e-01,
+                -3.2210e-01,
+                3.4675e+00,
+                -4.0276e-01,
+                9.9708e-01,
+                4.5629e-01,
+                -2.1226e+00,
+                3.1440e-02,
+                6.9736e-01,
+                -8.1089e-02,
+                9.0804e-01,
+                1.4047e-01,
+                8.4391e+00,
+                -2.0752e+00,
+                -8.7430e-01,
+                -7.7912e-02,
+                -2.0740e+00,
+                -1.7876e+00,
+                1.0030e+00,
+                9.5910e-01,
+                6.0602e-01,
+                -4.5903e-01,
+                -4.2717e-01,
+                1.0781e-01,
+                8.4801e-02,
+                -2.5715e+00,
+                1.4040e+00,
+                -5.0307e-01,
+                9.4194e-02,
+                1.0305e+00,
+                9.8130e-01,
+                -5.8686e-01,
+                1.6744e-01,
+                -6.1679e-01,
+                7.5075e-01,
+                1.3138e+00,
+                -5.2879e+00,
+                6.8969e-03,
+                9.5780e-01,
+                3.2709e+00,
+                -2.9069e+00,
+                -8.2521e-01,
+                3.4310e+00,
+            ],
+        )
+        .unwrap();
+        let xk_out_expected = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[2, 3, 2, 4]),
+            vec![
+                0.3945, 0.2538, -1.6629, -3.3645, 0.4492, 0.0569, 0.5328, -1.8116, 0.8397, 0.1577,
+                -0.7211, 0.3720, -0.6139, -0.1664, -0.2298, -0.8399, 3.9257, 8.3476, 7.2554,
+                0.1753, 3.0560, -0.4903, 0.6540, 2.2389, 0.4675, 0.3866, -1.5703, 1.6178, 0.0969,
+                -0.8927, 2.7338, 0.3586, 0.4324, -0.4762, 0.6024, 1.2822, -1.4641, -1.0585, 0.6429,
+                1.4430, -2.9772, -2.6890, 0.6983, 1.8505, -1.7163, 1.0874, -0.9149, -1.8745,
+            ],
+        )
+        .unwrap();
+        let (output_xq, output_xk) = apply_rotary_emb(&xq, &xk, &freqs_cos, &freqs_sin);
+        assert_abs_diff_eq!(
+            output_xq,
+            xq_out_expected,
+            epsilon = 1e-4
+        );
+        assert_abs_diff_eq!(
+            output_xk,
+            xk_out_expected,
+            epsilon = 1e-4
+        );
     }
 }

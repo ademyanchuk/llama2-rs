@@ -10,3 +10,4 @@ anyhow = "1.0.72"
 approx = "0.5.1"
 byteorder = "1.4.3"
 ndarray = { version = "0.15.6", features = ["rayon", "approx-0_5"] }
+rand = "0.8.5"
