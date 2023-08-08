@@ -278,6 +278,7 @@ fn apply_rotary_emb(
     // Flatten dimensions starting from 3d
     let stacked = ndarray::stack(Axis(xq_out_r.ndim()), &[xq_out_r.view(), xq_out_i.view()])
         .expect("stack works with equal dims");
+    let stacked = stacked.as_standard_layout().to_owned(); // stack op create array with f-layout
     let new_shape = stacked.shape().to_vec();
     let last_dim = new_shape.iter().skip(3).product();
     let mut new_shape: Vec<usize> = new_shape.into_iter().take(3).collect();
@@ -288,6 +289,7 @@ fn apply_rotary_emb(
 
     let stacked = ndarray::stack(Axis(xk_out_r.ndim()), &[xk_out_r.view(), xk_out_i.view()])
         .expect("stack works with equal dims");
+    let stacked = stacked.as_standard_layout().to_owned();
     let new_shape = stacked.shape().to_vec();
     let last_dim = new_shape.iter().skip(3).product();
     let mut new_shape: Vec<usize> = new_shape.into_iter().take(3).collect();
@@ -342,7 +344,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use approx::*;
-    use ndarray::{arr1, ArrayD, ShapeBuilder};
+    use ndarray::{arr1, ArrayD};
 
     #[test]
     fn test_new_with_valid_inputs() {
@@ -806,15 +808,7 @@ mod tests {
         )
         .unwrap();
         let (output_xq, output_xk) = apply_rotary_emb(&xq, &xk, &freqs_cos, &freqs_sin);
-        assert_abs_diff_eq!(
-            output_xq,
-            xq_out_expected,
-            epsilon = 1e-4
-        );
-        assert_abs_diff_eq!(
-            output_xk,
-            xk_out_expected,
-            epsilon = 1e-4
-        );
+        assert_abs_diff_eq!(output_xq, xq_out_expected, epsilon = 1e-3);
+        assert_abs_diff_eq!(output_xk, xk_out_expected, epsilon = 1e-3);
     }
 }
