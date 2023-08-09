@@ -3,7 +3,9 @@ mod test_data;
 
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
-use ndarray::{s, Array, Array1, Array2, ArrayD, ArrayView, Axis, Dim, IxDyn, IxDynImpl, Zip};
+use ndarray::{
+    s, Array, Array1, Array2, Array4, ArrayD, ArrayView, Axis, Dim, Ix5, IxDyn, IxDynImpl, Zip, Array5,
+};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
@@ -374,6 +376,34 @@ fn create_mask(max_seq_len: usize) -> ArrayD<f32> {
     }
 
     mask
+}
+fn repeat_kv(x: Array4<f32>, n_rep: usize) -> Array4<f32> {
+    let (bs, slen, n_kv_heads, head_dim) = x.dim();
+
+    if n_rep == 1 {
+        return x;
+    }
+
+    // Insert a new axis
+    let x_view = x.view().insert_axis(Axis(3));
+
+    // Shape for broadcasting
+    let broadcast_shape = Ix5(bs, slen, n_kv_heads, n_rep, head_dim);
+
+    // Broadcast and then reshape
+    let broadcasted = x_view
+        .broadcast(broadcast_shape)
+        .expect("Failed to broadcast!");
+
+    // Create a new physical copy
+    let copied = Array5::from_shape_vec(broadcast_shape, broadcasted.iter().cloned().collect())
+        .expect("Failed to create copied array!");
+
+    let reshaped = copied
+        .into_shape((bs, slen, n_kv_heads * n_rep, head_dim))
+        .expect("Failed to reshape!");
+
+    reshaped
 }
 
 fn main() -> Result<()> {
@@ -781,5 +811,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mask, expected)
+    }
+    #[test]
+    fn test_repeat_kv() {
+        let inp = Array4::from_shape_vec((2, 3, 2, 3), REP_KV_INP.to_vec()).unwrap();
+        let repeated = repeat_kv(inp, 2);
+        let expected = Array4::from_shape_vec((2, 3, 4, 3), REP_KV_OUT.to_vec()).unwrap();
+        assert_eq!(repeated, expected)
     }
 }
