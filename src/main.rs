@@ -4,6 +4,7 @@ mod test_data;
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{s, Array, Array1, Array2, ArrayD, ArrayView, Axis, Dim, IxDyn, IxDynImpl, Zip};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -16,7 +17,6 @@ pub struct ModelArgs {
     pub multiple_of: usize,
     pub norm_eps: f32,
     pub max_seq_len: usize,
-    pub dropout: f32,
 }
 
 impl Default for ModelArgs {
@@ -30,12 +30,67 @@ impl Default for ModelArgs {
             multiple_of: 256,
             norm_eps: 1e-5,
             max_seq_len: 2048,
-            dropout: 0.0,
         }
     }
 }
 
 // Blocks
+
+pub struct Attention {
+    wq: Linear,
+    wk: Linear,
+    wv: Linear,
+    wo: Linear,
+    mask: ArrayD<f32>,
+    n_heads: usize,
+    n_kv_heads: usize,
+    n_rep: usize,
+    head_dim: usize,
+}
+impl Attention {
+    pub fn new(args: &ModelArgs, mut weight_data: HashMap<&str, Vec<f32>>) -> Attention {
+        let n_heads = args.n_heads;
+        let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
+        let n_rep = n_heads / n_kv_heads;
+        let head_dim = args.dim / n_heads;
+        let wq = Linear::new(
+            weight_data.remove("wq").expect("wq is expected"),
+            None,
+            args.dim,
+            n_heads * head_dim,
+        );
+        let wk = Linear::new(
+            weight_data.remove("wk").expect("wk is expected"),
+            None,
+            args.dim,
+            n_kv_heads * head_dim,
+        );
+        let wv = Linear::new(
+            weight_data.remove("wv").expect("wv is expected"),
+            None,
+            args.dim,
+            n_kv_heads * head_dim,
+        );
+        let wo = Linear::new(
+            weight_data.remove("wo").expect("wo is expected"),
+            None,
+            n_heads * head_dim,
+            args.dim,
+        );
+        let mask = create_mask(args.max_seq_len);
+        Attention {
+            wq,
+            wk,
+            wv,
+            wo,
+            mask,
+            n_heads,
+            n_kv_heads,
+            n_rep,
+            head_dim,
+        }
+    }
+}
 pub struct FeedForward {
     w1: Linear,
     w2: Linear,
@@ -304,6 +359,21 @@ fn apply_rotary_emb(
         xq_out.into_dimensionality::<IxDyn>().unwrap(),
         xk_out.into_dimensionality::<IxDyn>().unwrap(),
     )
+}
+
+fn create_mask(max_seq_len: usize) -> ArrayD<f32> {
+    // Create an array filled with -inf
+    let mut mask = ArrayD::from_elem(IxDyn(&[1, 1, max_seq_len, max_seq_len]), f32::NEG_INFINITY);
+
+    // Iterate over the array and modify values to 0 for elements below or on the diagonal
+    for i in 0..max_seq_len {
+        for j in 0..=i {
+            // note the `=` here to include the diagonal
+            mask[[0, 0, i, j]] = 0.0;
+        }
+    }
+
+    mask
 }
 
 fn main() -> Result<()> {
@@ -691,5 +761,25 @@ mod tests {
         let (output_xq, output_xk) = apply_rotary_emb(&xq, &xk, &freqs_cos, &freqs_sin);
         assert_abs_diff_eq!(output_xq, xq_out_expected, epsilon = 1e-3);
         assert_abs_diff_eq!(output_xk, xk_out_expected, epsilon = 1e-3);
+    }
+    #[test]
+    fn test_create_mask() {
+        let mask = create_mask(3);
+        let expected = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[1, 1, 3, 3]),
+            vec![
+                0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                0.0,
+                0.0,
+                f32::NEG_INFINITY,
+                0.0,
+                0.0,
+                0.0,
+            ],
+        )
+        .unwrap();
+        assert_eq!(mask, expected)
     }
 }
