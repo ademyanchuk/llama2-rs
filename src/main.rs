@@ -4,8 +4,8 @@ mod test_data;
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{
-    s, Array, Array1, Array2, Array4, Array5, ArrayD, ArrayView, Axis, Dim, Dimension, Ix5, IxDyn,
-    IxDynImpl, Zip,
+    s, Array, Array1, Array2, Array5, ArrayD, ArrayView, Axis, Dim, Ix2, IxDyn,
+    IxDynImpl, Zip, Ix5,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -105,10 +105,30 @@ impl Attention {
         let xq = self.wq.forward(&x);
         let xk = self.wk.forward(&x);
         let xv = self.wv.forward(&x);
+        let xq = xq
+            .into_shape((bsz, seq_len, self.n_heads, self.head_dim))
+            .unwrap()
+            .into_dyn();
+        let xk = xk
+            .into_shape((bsz, seq_len, self.n_kv_heads, self.head_dim))
+            .unwrap()
+            .into_dyn();
+        let xv = xv
+            .into_shape((bsz, seq_len, self.n_kv_heads, self.head_dim))
+            .unwrap()
+            .into_dyn();
+
         // RoPE relative positional embeddings
-        let (xq, xk) = apply_rotary_emb(&xq, &xk, freqs_cos, freqs_sin);
+        let (mut xq, xk) = apply_rotary_emb(&xq, &xk, freqs_cos, freqs_sin);
+
         // grouped multiquery attention: expand out keys and values
-        let xk = repeat_kv(xk, self.n_rep);
+        let mut xk = repeat_kv(xk, self.n_rep); // (bs, seqlen, n_heads, head_dim)
+        let mut xv = repeat_kv(xv, self.n_rep); // (bs, seqlen, n_heads, head_dim)
+
+        // make heads into a batch dimension
+        xq.swap_axes(1, 2); // (bs, n_heads, seqlen, head_dim)
+        xk.swap_axes(1, 2);
+        xv.swap_axes(1, 2);
 
         todo!()
     }
@@ -430,6 +450,41 @@ fn repeat_kv(x: ArrayD<f32>, n_rep: usize) -> ArrayD<f32> {
         .expect("Failed to reshape!")
 }
 
+fn batched_matmul_4d(a: &ArrayD<f32>, b: &ArrayD<f32>, alpha: f32) -> ArrayD<f32> {
+    let shape_a = a.shape();
+    let shape_b = b.shape();
+
+    // Ensure that both arrays have 4 dimensions
+    assert_eq!(shape_a.len(), 4);
+    assert_eq!(shape_b.len(), 4);
+
+    assert_eq!(shape_a[0], shape_b[0]);
+    assert_eq!(shape_a[1], shape_b[1]);
+    assert_eq!(shape_a[3], shape_b[2]);
+
+    let mut result = ArrayD::zeros(vec![shape_a[0], shape_a[1], shape_a[2], shape_b[3]].as_slice());
+
+    for i in 0..shape_a[0] {
+        for j in 0..shape_a[1] {
+            let slice_a = a
+                .slice(s![i, j, .., ..])
+                .into_dimensionality::<Ix2>()
+                .unwrap();
+            let slice_b = b
+                .slice(s![i, j, .., ..])
+                .into_dimensionality::<Ix2>()
+                .unwrap();
+
+            let mut view_mut = result
+                .slice_mut(s![i, j, .., ..])
+                .into_dimensionality::<Ix2>()
+                .unwrap();
+            ndarray::linalg::general_mat_mul(alpha, &slice_a, &slice_b, 1.0, &mut view_mut);
+        }
+    }
+
+    result
+}
 fn main() -> Result<()> {
     // Open the file
     let mut f = File::open("stories15M.bin")?;
@@ -844,5 +899,14 @@ mod tests {
         let expected =
             ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 3, 4, 3]), REP_KV_OUT.to_vec()).unwrap();
         assert_eq!(repeated, expected)
+    }
+    #[test]
+    fn test_batched_matmul_4d() {
+        let a = ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 2, 4]), MAT_MUL_A.to_vec()).unwrap();
+        let b = ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 4, 3]), MAT_MUL_B.to_vec()).unwrap();
+        let c = batched_matmul_4d(&a, &b, 1.0);
+        let expected_c =
+            ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 2, 3]), MAT_MUL_EXPECT.to_vec()).unwrap();
+        assert_abs_diff_eq!(c, expected_c, epsilon = 1e-3)
     }
 }
