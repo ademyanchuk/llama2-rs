@@ -4,7 +4,8 @@ mod test_data;
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{
-    s, Array, Array1, Array2, Array4, ArrayD, ArrayView, Axis, Dim, Ix5, IxDyn, IxDynImpl, Zip, Array5,
+    s, Array, Array1, Array2, Array4, Array5, ArrayD, ArrayView, Axis, Dim, Dimension, Ix5, IxDyn,
+    IxDynImpl, Zip,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -91,6 +92,25 @@ impl Attention {
             n_rep,
             head_dim,
         }
+    }
+    pub fn forward<T: ndarray::Dimension<Larger = Dim<IxDynImpl>>>(
+        &self,
+        x: Array<f32, T>,
+        freqs_cos: &Array2<f32>,
+        freqs_sin: &Array2<f32>,
+    ) -> Array<f32, T::Larger> {
+        assert!(x.ndim() > 2);
+        let (bsz, seq_len) = (x.shape()[0], x.shape()[1]);
+        // QKV
+        let xq = self.wq.forward(&x);
+        let xk = self.wk.forward(&x);
+        let xv = self.wv.forward(&x);
+        // RoPE relative positional embeddings
+        let (xq, xk) = apply_rotary_emb(&xq, &xk, freqs_cos, freqs_sin);
+        // grouped multiquery attention: expand out keys and values
+        let xk = repeat_kv(xk, self.n_rep);
+
+        todo!()
     }
 }
 pub struct FeedForward {
@@ -377,8 +397,14 @@ fn create_mask(max_seq_len: usize) -> ArrayD<f32> {
 
     mask
 }
-fn repeat_kv(x: Array4<f32>, n_rep: usize) -> Array4<f32> {
-    let (bs, slen, n_kv_heads, head_dim) = x.dim();
+fn repeat_kv(x: ArrayD<f32>, n_rep: usize) -> ArrayD<f32> {
+    let shape = x.shape();
+
+    if shape.len() != 4 {
+        panic!("Input array does not have 4 dimensions!");
+    }
+
+    let (bs, slen, n_kv_heads, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
 
     if n_rep == 1 {
         return x;
@@ -399,11 +425,9 @@ fn repeat_kv(x: Array4<f32>, n_rep: usize) -> Array4<f32> {
     let copied = Array5::from_shape_vec(broadcast_shape, broadcasted.iter().cloned().collect())
         .expect("Failed to create copied array!");
 
-    let reshaped = copied
-        .into_shape((bs, slen, n_kv_heads * n_rep, head_dim))
-        .expect("Failed to reshape!");
-
-    reshaped
+    copied
+        .into_shape(ndarray::IxDyn(&[bs, slen, n_kv_heads * n_rep, head_dim]))
+        .expect("Failed to reshape!")
 }
 
 fn main() -> Result<()> {
@@ -814,9 +838,11 @@ mod tests {
     }
     #[test]
     fn test_repeat_kv() {
-        let inp = Array4::from_shape_vec((2, 3, 2, 3), REP_KV_INP.to_vec()).unwrap();
+        let inp =
+            ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 3, 2, 3]), REP_KV_INP.to_vec()).unwrap();
         let repeated = repeat_kv(inp, 2);
-        let expected = Array4::from_shape_vec((2, 3, 4, 3), REP_KV_OUT.to_vec()).unwrap();
+        let expected =
+            ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 3, 4, 3]), REP_KV_OUT.to_vec()).unwrap();
         assert_eq!(repeated, expected)
     }
 }
