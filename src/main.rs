@@ -4,8 +4,7 @@ mod test_data;
 use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{
-    s, Array, Array1, Array2, Array5, ArrayD, ArrayView, Axis, Dim, Ix2, IxDyn,
-    IxDynImpl, Zip, Ix5,
+    s, Array, Array1, Array2, Array5, ArrayD, ArrayView, Axis, Dim, Ix2, Ix5, IxDyn, IxDynImpl, Zip,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -128,7 +127,12 @@ impl Attention {
         // make heads into a batch dimension
         xq.swap_axes(1, 2); // (bs, n_heads, seqlen, head_dim)
         xk.swap_axes(1, 2);
+        xk.swap_axes(2, 3); // (bs, n_heads, head_dim, seqlen), to match for future matmul(xq, xk)
         xv.swap_axes(1, 2);
+
+        let scores = batched_matmul_4d(&xq, &xk, 1.0 / (self.head_dim as f32).sqrt());
+        let scores = scores + self.mask.slice(s![.., .., ..seq_len, ..seq_len]);
+
 
         todo!()
     }
