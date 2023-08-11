@@ -132,8 +132,16 @@ impl Attention {
 
         let scores = batched_matmul_4d(&xq, &xk, 1.0 / (self.head_dim as f32).sqrt());
         let scores = scores + self.mask.slice(s![.., .., ..seq_len, ..seq_len]);
-
-        todo!()
+        let scores = softmax(&scores, scores.ndim() - 1);
+        let mut output = batched_matmul_4d(&scores, &xv, 1.0); // (bs, n_heads, seqlen, head_dim)
+                                                               // restore time as batch dimension and concat heads
+        output.swap_axes(1, 2);
+        let conc_dim: usize = output.shape().iter().skip(2).product();
+        output = output
+            .into_shape(ndarray::IxDyn(&[bsz, seq_len, conc_dim]))
+            .unwrap();
+        // final projection into the residual stream
+        self.wo.forward(&output)
     }
 }
 pub struct FeedForward {
