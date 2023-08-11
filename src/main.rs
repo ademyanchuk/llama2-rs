@@ -133,7 +133,6 @@ impl Attention {
         let scores = batched_matmul_4d(&xq, &xk, 1.0 / (self.head_dim as f32).sqrt());
         let scores = scores + self.mask.slice(s![.., .., ..seq_len, ..seq_len]);
 
-
         todo!()
     }
 }
@@ -489,6 +488,13 @@ fn batched_matmul_4d(a: &ArrayD<f32>, b: &ArrayD<f32>, alpha: f32) -> ArrayD<f32
 
     result
 }
+
+fn softmax(x: &ArrayD<f32>, axis: usize) -> ArrayD<f32> {
+    let e_x = x.mapv(|v| v.exp());
+    let sum_e_x = e_x.sum_axis(Axis(axis)).insert_axis(Axis(axis));
+    e_x / &sum_e_x
+}
+
 fn main() -> Result<()> {
     // Open the file
     let mut f = File::open("stories15M.bin")?;
@@ -912,5 +918,14 @@ mod tests {
         let expected_c =
             ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 2, 3]), MAT_MUL_EXPECT.to_vec()).unwrap();
         assert_abs_diff_eq!(c, expected_c, epsilon = 1e-3)
+    }
+    #[test]
+    fn test_softmax() {
+        let inp =
+            ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 3, 4]), SOFTMAX_INP.to_vec()).unwrap();
+        let result = softmax(&inp, 3);
+        let expect =
+            ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 3, 4]), SOFTMAX_EXPECT.to_vec()).unwrap();
+        assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
     }
 }
