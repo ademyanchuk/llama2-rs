@@ -21,6 +21,30 @@ pub struct ModelArgs {
     pub max_seq_len: usize,
 }
 
+impl ModelArgs {
+    pub fn new(
+        dim: usize,
+        n_layers: usize,
+        n_heads: usize,
+        n_kv_heads: Option<usize>,
+        vocab_size: isize,
+        multiple_of: usize,
+        norm_eps: f32,
+        max_seq_len: usize,
+    ) -> ModelArgs {
+        ModelArgs {
+            dim,
+            n_layers,
+            n_heads,
+            n_kv_heads,
+            vocab_size,
+            multiple_of,
+            norm_eps,
+            max_seq_len,
+        }
+    }
+}
+
 impl Default for ModelArgs {
     fn default() -> Self {
         ModelArgs {
@@ -136,6 +160,7 @@ impl Attention {
         let mut output = batched_matmul_4d(&scores, &xv, 1.0); // (bs, n_heads, seqlen, head_dim)
                                                                // restore time as batch dimension and concat heads
         output.swap_axes(1, 2);
+        output = output.as_standard_layout().to_owned();
         let conc_dim: usize = output.shape().iter().skip(2).product();
         output = output
             .into_shape(ndarray::IxDyn(&[bsz, seq_len, conc_dim]))
@@ -396,7 +421,6 @@ fn apply_rotary_emb(
     new_shape.push(last_dim);
 
     let xq_out = stacked.into_shape(new_shape.as_slice()).unwrap();
-    println!("{:?}", xq_out);
 
     let stacked = ndarray::stack(Axis(xk_out_r.ndim()), &[xk_out_r.view(), xk_out_i.view()])
         .expect("stack works with equal dims");
@@ -934,6 +958,43 @@ mod tests {
         let result = softmax(&inp, 3);
         let expect =
             ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 3, 4]), SOFTMAX_EXPECT.to_vec()).unwrap();
+        assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
+    }
+    #[test]
+    fn test_attention() {
+        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32);
+        let mut weights_data = HashMap::new();
+        weights_data.insert("wq", ATT_WQ.to_vec());
+        weights_data.insert("wk", ATT_WK.to_vec());
+        weights_data.insert("wv", ATT_WV.to_vec());
+        weights_data.insert("wo", ATT_WO.to_vec());
+        let att = Attention::new(&args, weights_data);
+
+        let seq_len = 4_usize;
+        let inp = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[2, seq_len, args.dim]),
+            ATT_INP_FLAT.to_vec(),
+        ) // bsz, seq_len, dim
+        .unwrap();
+        let freqs_cos = Array2::from_shape_vec(
+            (args.max_seq_len, args.dim / args.n_heads / 2),
+            ATT_FREQ_COS_FLAT.to_vec(),
+        )
+        .unwrap();
+        let freqs_sin = Array2::from_shape_vec(
+            (args.max_seq_len, args.dim / args.n_heads / 2),
+            ATT_FREQ_SIN_FLAT.to_vec(),
+        )
+        .unwrap();
+        let freqs_cos = freqs_cos.slice(s![..seq_len, ..]).to_owned();
+        let freqs_sin = freqs_sin.slice(s![..seq_len, ..]).to_owned();
+
+        let expect = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[2, seq_len, args.dim]),
+            ATT_OUT_FLAT.to_vec(),
+        ) // bsz, seq_len, dim
+        .unwrap();
+        let result = att.forward(inp, &freqs_cos, &freqs_sin);
         assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
     }
 }
