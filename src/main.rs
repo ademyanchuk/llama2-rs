@@ -1,4 +1,5 @@
 #[allow(dead_code)]
+#[allow(clippy::approx_constant)]
 mod test_data;
 
 use anyhow::Result;
@@ -56,6 +57,73 @@ impl Default for ModelArgs {
             multiple_of: 256,
             norm_eps: 1e-5,
             max_seq_len: 2048,
+        }
+    }
+}
+pub struct ModelArgsBuilder {
+    dim: Option<usize>,
+    n_layers: Option<usize>,
+    n_heads: Option<usize>,
+    n_kv_heads: Option<usize>,
+    vocab_size: Option<isize>,
+    multiple_of: Option<usize>,
+    norm_eps: Option<f32>,
+    max_seq_len: Option<usize>,
+}
+impl ModelArgsBuilder {
+    pub fn new() -> Self {
+        ModelArgsBuilder {
+            dim: None,
+            n_layers: None,
+            n_heads: None,
+            n_kv_heads: None,
+            vocab_size: None,
+            multiple_of: None,
+            norm_eps: None,
+            max_seq_len: None,
+        }
+    }
+
+    pub fn dim(mut self, dim: usize) -> Self {
+        self.dim = Some(dim);
+        self
+    }
+
+    pub fn n_heads(mut self, n_heads: usize) -> Self {
+        self.n_heads = Some(n_heads);
+        self
+    }
+
+    pub fn n_layers(mut self, n_layers: usize) -> Self {
+        self.n_layers = Some(n_layers);
+        self
+    }
+
+    pub fn multiple_of(mut self, multiple_of: usize) -> Self {
+        self.multiple_of = Some(multiple_of);
+        self
+    }
+
+    pub fn norm_eps(mut self, norm_eps: f32) -> Self {
+        self.norm_eps = Some(norm_eps);
+        self
+    }
+
+    pub fn max_seq_len(mut self, max_seq_len: usize) -> Self {
+        self.max_seq_len = Some(max_seq_len);
+        self
+    }
+
+    pub fn build(self) -> ModelArgs {
+        ModelArgs {
+            dim: self.dim.unwrap_or(4096),
+            n_layers: self.n_layers.unwrap_or(32),
+            n_heads: self.n_heads.unwrap_or(32),
+            n_kv_heads: self.n_kv_heads,
+            vocab_size: self.vocab_size.unwrap_or(-1),
+            multiple_of: self.multiple_of.unwrap_or(256),
+            norm_eps: self.norm_eps.unwrap_or(1e-5),
+            max_seq_len: self.max_seq_len.unwrap_or(2048),
         }
     }
 }
@@ -203,6 +271,59 @@ impl FeedForward {
         let x2 = self.w3.forward(&input);
         let result = x1 * x2;
         self.w2.forward(&result)
+    }
+}
+pub struct TransformerBlock {
+    layer_id: usize,
+    attention: Attention,
+    feed_forward: FeedForward,
+    attention_norm: RMSNorm,
+    ffn_norm: RMSNorm,
+}
+impl TransformerBlock {
+    pub fn new(
+        layer_id: usize,
+        args: &ModelArgs,
+        mut att_weights: HashMap<&str, Vec<f32>>,
+        mut ff_weights: HashMap<&str, Vec<f32>>,
+    ) -> TransformerBlock {
+        let att_norm_weight = att_weights.remove("rms").expect("rms weight data expected");
+        let attention = Attention::new(args, att_weights);
+        let feed_forward = FeedForward::new(
+            args.dim,
+            4 * args.dim,
+            args.multiple_of,
+            ff_weights.remove("w1").expect("w1 expected"),
+            ff_weights.remove("w2").expect("w2 expected"),
+            ff_weights.remove("w3").expect("w3 expected"),
+        );
+        let attention_norm = RMSNorm::new(args.dim, args.norm_eps, att_norm_weight);
+        let ffn_norm = RMSNorm::new(
+            args.dim,
+            args.norm_eps,
+            ff_weights.remove("rms").expect("rms weight data expected"),
+        );
+        TransformerBlock {
+            layer_id,
+            attention,
+            feed_forward,
+            attention_norm,
+            ffn_norm,
+        }
+    }
+    pub fn forward<T: ndarray::Dimension<Larger = Dim<IxDynImpl>> + ndarray::RemoveAxis>(
+        &self,
+        x: Array<f32, T>,
+        freqs_cos: &Array2<f32>,
+        freqs_sin: &Array2<f32>,
+    ) -> Array<f32, T::Larger> {
+        let x_clone = x.clone();
+        let h =
+            x + self
+                .attention
+                .forward(self.attention_norm.forward(x_clone), freqs_cos, freqs_sin);
+        let h_clone = h.clone();
+        h + self.feed_forward.forward(self.ffn_norm.forward(h_clone))
     }
 }
 
@@ -995,6 +1116,56 @@ mod tests {
         ) // bsz, seq_len, dim
         .unwrap();
         let result = att.forward(inp, &freqs_cos, &freqs_sin);
+        assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
+    }
+    #[test]
+    fn test_transformer_block() {
+        let args = ModelArgsBuilder::new()
+            .dim(8)
+            .n_heads(2)
+            .multiple_of(16)
+            .norm_eps(1e-5)
+            .max_seq_len(32)
+            .build();
+        // attention weights map
+        let mut att_weights = HashMap::new();
+        att_weights.insert("wq", TB_ATT_WQ.to_vec());
+        att_weights.insert("wk", TB_ATT_WK.to_vec());
+        att_weights.insert("wv", TB_ATT_WV.to_vec());
+        att_weights.insert("wo", TB_ATT_WO.to_vec());
+        att_weights.insert("rms", TB_ATT_RMS.to_vec());
+        // feed forward weights map
+        let mut ffn_weights = HashMap::new();
+        ffn_weights.insert("w1", TB_FFN_W1.to_vec());
+        ffn_weights.insert("w2", TB_FFN_W2.to_vec());
+        ffn_weights.insert("w3", TB_FFN_W3.to_vec());
+        ffn_weights.insert("rms", TB_FFN_RMS.to_vec());
+        // init block
+        let trns_block = TransformerBlock::new(0, &args, att_weights, ffn_weights);
+        // init inputs
+        let seq_len = 4_usize;
+        let inp = ArrayD::from_shape_vec(ndarray::IxDyn(&[2, seq_len, args.dim]), TB_INP.to_vec()) // bsz, seq_len, dim
+            .unwrap();
+        let freqs_cos = Array2::from_shape_vec(
+            (args.max_seq_len, args.dim / args.n_heads / 2),
+            TB_FREQS_COS.to_vec(),
+        )
+        .unwrap();
+        let freqs_sin = Array2::from_shape_vec(
+            (args.max_seq_len, args.dim / args.n_heads / 2),
+            TB_FREQS_SIN.to_vec(),
+        )
+        .unwrap();
+        let freqs_cos = freqs_cos.slice(s![..seq_len, ..]).to_owned();
+        let freqs_sin = freqs_sin.slice(s![..seq_len, ..]).to_owned();
+
+        // expected output
+        let expect = ArrayD::from_shape_vec(
+            ndarray::IxDyn(&[2, seq_len, args.dim]),
+            TB_OUT.to_vec(),
+        ) // bsz, seq_len, dim
+        .unwrap();
+        let result = trns_block.forward(inp, &freqs_cos, &freqs_sin);
         assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
     }
 }
