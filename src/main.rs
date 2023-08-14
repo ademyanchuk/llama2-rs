@@ -128,6 +128,23 @@ impl ModelArgsBuilder {
     }
 }
 
+// Model
+pub struct Transformer {
+    args: ModelArgs,
+    tok_embeddings: Embedding,
+    layers: Vec<TransformerBlock>,
+    norm: RMSNorm,
+    output: Linear,
+    freqs_cos: Array2<f32>,
+    freqs_sin: Array2<f32>,
+}
+
+impl Transformer {
+    pub fn new(args: ModelArgs, mut layers_data: Vec<HashMap<&str, Vec<f32>>>) -> Transformer {
+        todo!()
+    }
+}
+
 // Blocks
 
 pub struct Attention {
@@ -1160,11 +1177,9 @@ mod tests {
         let freqs_sin = freqs_sin.slice(s![..seq_len, ..]).to_owned();
 
         // expected output
-        let expect = ArrayD::from_shape_vec(
-            ndarray::IxDyn(&[2, seq_len, args.dim]),
-            TB_OUT.to_vec(),
-        ) // bsz, seq_len, dim
-        .unwrap();
+        let expect =
+            ArrayD::from_shape_vec(ndarray::IxDyn(&[2, seq_len, args.dim]), TB_OUT.to_vec()) // bsz, seq_len, dim
+                .unwrap();
         let result = trns_block.forward(inp, &freqs_cos, &freqs_sin);
         assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
     }
