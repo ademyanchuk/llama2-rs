@@ -194,6 +194,22 @@ impl Transformer {
             freqs_sin,
         }
     }
+    pub fn forward<T: ndarray::Dimension<Larger = Dim<IxDynImpl>> + ndarray::RemoveAxis>(
+        &self,
+        tokens: Array<usize, T>,
+    ) -> Array<f32, T::Larger> {
+        assert_eq!(tokens.ndim(), 2);
+        let seq_len = tokens.shape()[1];
+        let mut h = self.tok_embeddings.forward(tokens);
+        let freqs_cos = self.freqs_cos.slice(s![..seq_len, ..]).to_owned();
+        let freqs_sin = self.freqs_sin.slice(s![..seq_len, ..]).to_owned();
+
+        for layer in &self.layers {
+            h = layer.forward(h, &freqs_cos, &freqs_sin);
+        }
+        h = self.norm.forward(h);
+        self.output.forward(&h)
+    }
 }
 
 // Blocks
