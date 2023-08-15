@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 
+type F32VecMap<'a> = HashMap<&'a str, Vec<f32>>;
+
 pub struct ModelArgs {
     pub dim: usize,
     pub n_layers: usize,
@@ -148,17 +150,49 @@ pub struct Transformer {
 impl Transformer {
     pub fn new(
         args: ModelArgs,
-        mut tb_weighs_data: Vec<HashMap<&str, Vec<f32>>>,
-        mut other_weights_data: HashMap<&str, Vec<f32>>,
+        tb_weighs_data: Vec<(F32VecMap, F32VecMap)>,
+        mut other_weights_data: F32VecMap,
     ) -> Transformer {
-        let tok_embeddings = Embedding::new(
-            other_weights_data
-                .remove("embeddings")
-                .expect("embeedings expected"),
-            args.vocab_size,
+        let shared_weights = other_weights_data
+            .remove("embeddings")
+            .expect("embeedings expected");
+        let tok_embeddings = Embedding::new(shared_weights.clone(), args.vocab_size, args.dim);
+        assert_eq!(args.n_layers, tb_weighs_data.len());
+        let mut layers = Vec::new();
+        for layer_data in tb_weighs_data {
+            layers.push(TransformerBlock::new(&args, layer_data.0, layer_data.1));
+        }
+        let norm = RMSNorm::new(
             args.dim,
+            args.norm_eps,
+            other_weights_data
+                .remove("norm")
+                .expect("norm data expected"),
         );
-        todo!()
+        let output = Linear::new(shared_weights, None, args.dim, args.vocab_size);
+        let freqs_cos = Array2::from_shape_vec(
+            (args.max_seq_len, args.dim / args.n_heads / 2),
+            other_weights_data
+                .remove("freqs_cos")
+                .expect("freqs_cos expected"),
+        )
+        .unwrap();
+        let freqs_sin = Array2::from_shape_vec(
+            (args.max_seq_len, args.dim / args.n_heads / 2),
+            other_weights_data
+                .remove("freqs_sin")
+                .expect("freqs_sin expected"),
+        )
+        .unwrap();
+        Transformer {
+            args,
+            tok_embeddings,
+            layers,
+            norm,
+            output,
+            freqs_cos,
+            freqs_sin,
+        }
     }
 }
 
@@ -176,7 +210,7 @@ pub struct Attention {
     head_dim: usize,
 }
 impl Attention {
-    pub fn new(args: &ModelArgs, mut weight_data: HashMap<&str, Vec<f32>>) -> Attention {
+    pub fn new(args: &ModelArgs, mut weight_data: F32VecMap) -> Attention {
         let n_heads = args.n_heads;
         let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
         let n_rep = n_heads / n_kv_heads;
@@ -308,7 +342,6 @@ impl FeedForward {
     }
 }
 pub struct TransformerBlock {
-    layer_id: usize,
     attention: Attention,
     feed_forward: FeedForward,
     attention_norm: RMSNorm,
@@ -316,10 +349,9 @@ pub struct TransformerBlock {
 }
 impl TransformerBlock {
     pub fn new(
-        layer_id: usize,
         args: &ModelArgs,
-        mut att_weights: HashMap<&str, Vec<f32>>,
-        mut ff_weights: HashMap<&str, Vec<f32>>,
+        mut att_weights: F32VecMap,
+        mut ff_weights: F32VecMap,
     ) -> TransformerBlock {
         let att_norm_weight = att_weights.remove("rms").expect("rms weight data expected");
         let attention = Attention::new(args, att_weights);
@@ -338,7 +370,6 @@ impl TransformerBlock {
             ff_weights.remove("rms").expect("rms weight data expected"),
         );
         TransformerBlock {
-            layer_id,
             attention,
             feed_forward,
             attention_norm,
@@ -1175,7 +1206,7 @@ mod tests {
         ffn_weights.insert("w3", TB_FFN_W3.to_vec());
         ffn_weights.insert("rms", TB_FFN_RMS.to_vec());
         // init block
-        let trns_block = TransformerBlock::new(0, &args, att_weights, ffn_weights);
+        let trns_block = TransformerBlock::new(&args, att_weights, ffn_weights);
         // init inputs
         let seq_len = 4_usize;
         let inp = ArrayD::from_shape_vec(ndarray::IxDyn(&[2, seq_len, args.dim]), TB_INP.to_vec()) // bsz, seq_len, dim
