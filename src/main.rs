@@ -16,7 +16,7 @@ pub struct ModelArgs {
     pub n_layers: usize,
     pub n_heads: usize,
     pub n_kv_heads: Option<usize>,
-    pub vocab_size: isize,
+    pub vocab_size: usize,
     pub multiple_of: usize,
     pub norm_eps: f32,
     pub max_seq_len: usize,
@@ -28,7 +28,7 @@ impl ModelArgs {
         n_layers: usize,
         n_heads: usize,
         n_kv_heads: Option<usize>,
-        vocab_size: isize,
+        vocab_size: usize,
         multiple_of: usize,
         norm_eps: f32,
         max_seq_len: usize,
@@ -49,11 +49,12 @@ impl ModelArgs {
 impl Default for ModelArgs {
     fn default() -> Self {
         ModelArgs {
+            // default hyperparameters for the Llama 7B model
             dim: 4096,
             n_layers: 32,
             n_heads: 32,
             n_kv_heads: None,
-            vocab_size: -1,
+            vocab_size: 32000,
             multiple_of: 256,
             norm_eps: 1e-5,
             max_seq_len: 2048,
@@ -65,7 +66,7 @@ pub struct ModelArgsBuilder {
     n_layers: Option<usize>,
     n_heads: Option<usize>,
     n_kv_heads: Option<usize>,
-    vocab_size: Option<isize>,
+    vocab_size: Option<usize>,
     multiple_of: Option<usize>,
     norm_eps: Option<f32>,
     max_seq_len: Option<usize>,
@@ -91,6 +92,11 @@ impl ModelArgsBuilder {
 
     pub fn n_heads(mut self, n_heads: usize) -> Self {
         self.n_heads = Some(n_heads);
+        self
+    }
+
+    pub fn vocab_size(mut self, vocab_size: usize) -> Self {
+        self.vocab_size = Some(vocab_size);
         self
     }
 
@@ -120,7 +126,7 @@ impl ModelArgsBuilder {
             n_layers: self.n_layers.unwrap_or(32),
             n_heads: self.n_heads.unwrap_or(32),
             n_kv_heads: self.n_kv_heads,
-            vocab_size: self.vocab_size.unwrap_or(-1),
+            vocab_size: self.vocab_size.unwrap_or(32000),
             multiple_of: self.multiple_of.unwrap_or(256),
             norm_eps: self.norm_eps.unwrap_or(1e-5),
             max_seq_len: self.max_seq_len.unwrap_or(2048),
@@ -140,7 +146,18 @@ pub struct Transformer {
 }
 
 impl Transformer {
-    pub fn new(args: ModelArgs, mut layers_data: Vec<HashMap<&str, Vec<f32>>>) -> Transformer {
+    pub fn new(
+        args: ModelArgs,
+        mut tb_weighs_data: Vec<HashMap<&str, Vec<f32>>>,
+        mut other_weights_data: HashMap<&str, Vec<f32>>,
+    ) -> Transformer {
+        let tok_embeddings = Embedding::new(
+            other_weights_data
+                .remove("embeddings")
+                .expect("embeedings expected"),
+            args.vocab_size,
+            args.dim,
+        );
         todo!()
     }
 }
