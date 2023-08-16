@@ -10,6 +10,7 @@ use ndarray::{
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
+use std::path::Path;
 
 type F32VecMap<'a> = HashMap<&'a str, Vec<f32>>;
 
@@ -217,7 +218,7 @@ impl Transformer {
     }
     /// Import from Karpathy's bin structure,
     /// that is how model supposed to be created
-    pub fn from(model_path: &str) -> Result<Transformer> {
+    pub fn from<P: AsRef<Path>>(model_path: P) -> Result<Transformer> {
         // This is very ugly function, need to fix all of the copy/paste later
         let mut f = File::open(model_path)?;
         let mut buffer = [0; 28]; // header == 7 integers * 4 bytes each
@@ -959,6 +960,8 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use super::*;
     use approx::*;
     use ndarray::{arr1, ArrayD};
@@ -1437,5 +1440,32 @@ mod tests {
                 .unwrap();
         let result = trns_block.forward(inp, &freqs_cos, &freqs_sin);
         assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
+    }
+
+    #[test]
+    fn test_import_transformer_from_file() {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_tiny.bin");
+        assert!(Transformer::from(path).is_ok())
+    }
+    #[test]
+    fn test_transformer_forward() {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_tiny.bin");
+        let transformer = Transformer::from(path)
+            .expect("should work, if test_import_transformer_from_file passed");
+        let inp = ArrayD::from_shape_vec(ndarray::IxDyn(&[4, 8]), TN_INP.to_vec()).unwrap();
+        let expect = ArrayD::from_shape_vec(ndarray::IxDyn(&[4, 1, 32]), TN_OUT.to_vec()).unwrap();
+        let result = transformer.forward(inp); // batch_sz, seq_len, vocab_size
+        assert_eq!(result.ndim(), 3);
+        let last_t = result.shape()[1] - 1;
+        let out = result.slice(s![.., last_t..last_t+1, ..]).to_owned().into_dyn();
+        assert_abs_diff_eq!(out, expect, epsilon = 1e-3)
     }
 }
