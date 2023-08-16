@@ -19,7 +19,7 @@ pub struct ModelArgs {
     pub n_heads: usize,
     pub n_kv_heads: Option<usize>,
     pub vocab_size: usize,
-    pub multiple_of: usize,
+    pub hidden_dim: usize,
     pub norm_eps: f32,
     pub max_seq_len: usize,
 }
@@ -31,7 +31,7 @@ impl ModelArgs {
         n_heads: usize,
         n_kv_heads: Option<usize>,
         vocab_size: usize,
-        multiple_of: usize,
+        hidden_dim: usize,
         norm_eps: f32,
         max_seq_len: usize,
     ) -> ModelArgs {
@@ -41,7 +41,7 @@ impl ModelArgs {
             n_heads,
             n_kv_heads,
             vocab_size,
-            multiple_of,
+            hidden_dim,
             norm_eps,
             max_seq_len,
         }
@@ -57,7 +57,7 @@ impl Default for ModelArgs {
             n_heads: 32,
             n_kv_heads: None,
             vocab_size: 32000,
-            multiple_of: 256,
+            hidden_dim: 256,
             norm_eps: 1e-5,
             max_seq_len: 2048,
         }
@@ -69,7 +69,7 @@ pub struct ModelArgsBuilder {
     n_heads: Option<usize>,
     n_kv_heads: Option<usize>,
     vocab_size: Option<usize>,
-    multiple_of: Option<usize>,
+    hidden_dim: Option<usize>,
     norm_eps: Option<f32>,
     max_seq_len: Option<usize>,
 }
@@ -81,7 +81,7 @@ impl ModelArgsBuilder {
             n_heads: None,
             n_kv_heads: None,
             vocab_size: None,
-            multiple_of: None,
+            hidden_dim: None,
             norm_eps: None,
             max_seq_len: None,
         }
@@ -107,8 +107,8 @@ impl ModelArgsBuilder {
         self
     }
 
-    pub fn multiple_of(mut self, multiple_of: usize) -> Self {
-        self.multiple_of = Some(multiple_of);
+    pub fn hidden_dim(mut self, hidden_dim: usize) -> Self {
+        self.hidden_dim = Some(hidden_dim);
         self
     }
 
@@ -129,7 +129,7 @@ impl ModelArgsBuilder {
             n_heads: self.n_heads.unwrap_or(32),
             n_kv_heads: self.n_kv_heads,
             vocab_size: self.vocab_size.unwrap_or(32000),
-            multiple_of: self.multiple_of.unwrap_or(256),
+            hidden_dim: self.hidden_dim.unwrap_or(256),
             norm_eps: self.norm_eps.unwrap_or(1e-5),
             max_seq_len: self.max_seq_len.unwrap_or(2048),
         }
@@ -331,14 +331,10 @@ impl FeedForward {
     pub fn new(
         in_dim: usize,
         hidden_dim: usize,
-        multiple_of: usize,
         w1_weights: Vec<f32>,
         w2_weights: Vec<f32>,
         w3_weights: Vec<f32>,
     ) -> FeedForward {
-        let hidden_dim = 2 * hidden_dim / 3;
-        let hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) / multiple_of);
-
         let w1 = Linear::new(w1_weights, None, in_dim, hidden_dim);
         let w2 = Linear::new(w2_weights, None, hidden_dim, in_dim);
         let w3 = Linear::new(w3_weights, None, in_dim, hidden_dim);
@@ -373,8 +369,7 @@ impl TransformerBlock {
         let attention = Attention::new(args, att_weights);
         let feed_forward = FeedForward::new(
             args.dim,
-            4 * args.dim,
-            args.multiple_of,
+            args.hidden_dim,
             ff_weights.remove("w1").expect("w1 expected"),
             ff_weights.remove("w2").expect("w2 expected"),
             ff_weights.remove("w3").expect("w3 expected"),
@@ -1015,7 +1010,7 @@ mod tests {
             -0.4622, -0.5098, 0.4391, 0.4349, -0.4857, 0.3582, 0.2414, 0.3671, 0.2596, 0.2129,
             0.0142, 0.1426,
         ];
-        let feed_forward = FeedForward::new(3, 4, 4, w1_weights, w2_weights, w3_weights);
+        let feed_forward = FeedForward::new(3, 4, w1_weights, w2_weights, w3_weights);
 
         // 2. Provide it with a predefined input
         let input = Array::from_shape_vec(
@@ -1204,7 +1199,7 @@ mod tests {
         let args = ModelArgsBuilder::new()
             .dim(8)
             .n_heads(2)
-            .multiple_of(16)
+            .hidden_dim(32)
             .norm_eps(1e-5)
             .max_seq_len(32)
             .build();
