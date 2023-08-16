@@ -2,7 +2,7 @@
 #[allow(clippy::approx_constant)]
 mod test_data;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{
     s, Array, Array1, Array2, Array5, ArrayD, ArrayView, Axis, Dim, Ix2, Ix5, IxDyn, IxDynImpl, Zip,
@@ -112,6 +112,11 @@ impl ModelArgsBuilder {
         self
     }
 
+    pub fn n_kv_heads(mut self, n_kv_heads: usize) -> Self {
+        self.n_kv_heads = Some(n_kv_heads);
+        self
+    }
+
     pub fn norm_eps(mut self, norm_eps: f32) -> Self {
         self.norm_eps = Some(norm_eps);
         self
@@ -209,6 +214,197 @@ impl Transformer {
         }
         h = self.norm.forward(h);
         self.output.forward(&h)
+    }
+    /// Import from Karpathy's bin structure,
+    /// that is how model supposed to be created
+    pub fn from(model_path: &str) -> Result<Transformer> {
+        // This is very ugly function, need to fix all of the copy/paste later
+        let mut f = File::open(model_path)?;
+        let mut buffer = [0; 28]; // header == 7 integers * 4 bytes each
+
+        // Read the first 28 bytes (header)
+        f.read_exact(&mut buffer)?;
+
+        // Convert bytes to integers
+        let mut cursor = std::io::Cursor::new(buffer);
+        let args = ModelArgsBuilder::new()
+            .dim(cursor.read_i32::<LittleEndian>()? as usize)
+            .hidden_dim(cursor.read_i32::<LittleEndian>()? as usize)
+            .n_layers(cursor.read_i32::<LittleEndian>()? as usize)
+            .n_heads(cursor.read_i32::<LittleEndian>()? as usize)
+            .n_kv_heads(cursor.read_i32::<LittleEndian>()? as usize)
+            .vocab_size(cursor.read_i32::<LittleEndian>()? as usize)
+            .max_seq_len(cursor.read_i32::<LittleEndian>()? as usize)
+            .build();
+        // Weights data storages
+        let mut other_weights_data: F32VecMap = HashMap::new();
+        let mut tb_weights_data: Vec<(F32VecMap, F32VecMap)> =
+            vec![(HashMap::new(), HashMap::new()); args.n_layers];
+        // import embedding layer data
+        let n_weights = args.vocab_size * args.dim;
+        let mut buffer = vec![0; n_weights * 4]; // 4 bytes per f32
+
+        // Read the appropriate number of bytes from the file.
+        f.read_exact(&mut buffer)?;
+
+        // Convert bytes to floats
+        let mut cursor = std::io::Cursor::new(buffer);
+        let mut emb_weights = Vec::new();
+        for _ in 0..n_weights {
+            let weight = cursor.read_f32::<LittleEndian>()?;
+            emb_weights.push(weight);
+        }
+        other_weights_data.insert("embeddings", emb_weights);
+        // attention weights (map, map).0
+        // rms norm
+        for pair in tb_weights_data.iter_mut() {
+            let mut buffer = vec![0; args.dim * 4]; // norm dimension
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut norm_weights = Vec::new();
+            for _ in 0..args.dim {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                norm_weights.push(w);
+            }
+            pair.0.insert("rms", norm_weights);
+        }
+        // wq
+        for pair in tb_weights_data.iter_mut() {
+            let sz = args.dim * args.dim; // size of wq
+            let mut buffer = vec![0; sz * 4];
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut wq_weights = Vec::new();
+            for _ in 0..sz {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                wq_weights.push(w);
+            }
+            pair.0.insert("wq", wq_weights);
+        }
+        // wk
+        for pair in tb_weights_data.iter_mut() {
+            let head_dim = args.dim / args.n_heads;
+            let n_kv_heads = args.n_kv_heads.unwrap_or(args.n_heads);
+            let sz = args.dim * (n_kv_heads * head_dim); // size of wk
+            let mut buffer = vec![0; sz * 4];
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut wk_weights = Vec::new();
+            for _ in 0..sz {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                wk_weights.push(w);
+            }
+            pair.0.insert("wk", wk_weights);
+        }
+        // wv
+        for pair in tb_weights_data.iter_mut() {
+            let head_dim = args.dim / args.n_heads;
+            let n_kv_heads = args.n_kv_heads.unwrap_or(args.n_heads);
+            let sz = args.dim * (n_kv_heads * head_dim); // size of wv
+            let mut buffer = vec![0; sz * 4];
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut wv_weights = Vec::new();
+            for _ in 0..sz {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                wv_weights.push(w);
+            }
+            pair.0.insert("wv", wv_weights);
+        }
+        // wo
+        for pair in tb_weights_data.iter_mut() {
+            let sz = args.dim * args.dim; // size of wo
+            let mut buffer = vec![0; sz * 4];
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut wo_weights = Vec::new();
+            for _ in 0..sz {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                wo_weights.push(w);
+            }
+            pair.0.insert("wo", wo_weights);
+        }
+        // ffn weights (map, map).1
+        // rms norm
+        for pair in tb_weights_data.iter_mut() {
+            let mut buffer = vec![0; args.dim * 4]; // norm dimension
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut norm_weights = Vec::new();
+            for _ in 0..args.dim {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                norm_weights.push(w);
+            }
+            pair.1.insert("rms", norm_weights);
+        }
+        // w1, w2, w3
+        for pair in tb_weights_data.iter_mut() {
+            let sz = args.dim * args.hidden_dim; // size of w1, w2, w3
+            let mut buffer = vec![0; sz * 4];
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut w_weights = Vec::new();
+            for _ in 0..sz {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                w_weights.push(w);
+            }
+            pair.1.insert("w1", w_weights);
+        }
+        for pair in tb_weights_data.iter_mut() {
+            let sz = args.dim * args.hidden_dim; // size of w1, w2, w3
+            let mut buffer = vec![0; sz * 4];
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut w_weights = Vec::new();
+            for _ in 0..sz {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                w_weights.push(w);
+            }
+            pair.1.insert("w2", w_weights);
+        }
+        for pair in tb_weights_data.iter_mut() {
+            let sz = args.dim * args.hidden_dim; // size of w1, w2, w3
+            let mut buffer = vec![0; sz * 4];
+            f.read_exact(&mut buffer)?;
+            let mut cursor = std::io::Cursor::new(buffer);
+            let mut w_weights = Vec::new();
+            for _ in 0..sz {
+                let w = cursor.read_f32::<LittleEndian>()?;
+                w_weights.push(w);
+            }
+            pair.1.insert("w3", w_weights);
+        }
+        // transformer own norm
+        let mut buffer = vec![0; args.dim * 4]; // norm dimension
+        f.read_exact(&mut buffer)?;
+        let mut cursor = std::io::Cursor::new(buffer);
+        let mut norm_weights = Vec::new();
+        for _ in 0..args.dim {
+            let w = cursor.read_f32::<LittleEndian>()?;
+            norm_weights.push(w);
+        }
+        other_weights_data.insert("norm", norm_weights);
+        // freqs
+        let sz = args.max_seq_len * (args.dim / args.n_heads / 2); // size of freqs
+        let mut buffer = vec![0; sz * 4];
+        f.read_exact(&mut buffer)?;
+        let mut cursor = std::io::Cursor::new(buffer);
+        let mut freqs_weights = Vec::new();
+        for _ in 0..sz {
+            let w = cursor.read_f32::<LittleEndian>()?;
+            freqs_weights.push(w);
+        }
+        other_weights_data.insert("freqs_cos", freqs_weights);
+        let mut buffer = vec![0; sz * 4];
+        f.read_exact(&mut buffer)?;
+        let mut cursor = std::io::Cursor::new(buffer);
+        let mut freqs_weights = Vec::new();
+        for _ in 0..sz {
+            let w = cursor.read_f32::<LittleEndian>()?;
+            freqs_weights.push(w);
+        }
+        other_weights_data.insert("freqs_sin", freqs_weights);
+        Ok(Transformer::new(args, tb_weights_data, other_weights_data))
     }
 }
 
