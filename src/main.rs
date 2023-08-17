@@ -407,6 +407,31 @@ impl Transformer {
         other_weights_data.insert("freqs_sin", freqs_weights);
         Ok(Transformer::new(args, tb_weights_data, other_weights_data))
     }
+    /// Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+    /// the sequence max_new_tokens times, feeding the predictions back into the model each time.
+    /// Also note this is a super inefficient version of sampling with no key/value cache.
+    pub fn generate<T: ndarray::Dimension<Larger = Dim<IxDynImpl>> + ndarray::RemoveAxis>(
+        &self,
+        idx: Array2<usize>,
+        max_new_tokens: usize,
+        temperature: f32,
+        top_k: Option<usize>,
+    ) -> Array2<usize> {
+        assert_eq!(idx.ndim(), 2);
+        for _ in 0..max_new_tokens {
+            let start_col = if idx.shape()[1] > self.args.max_seq_len {
+                idx.shape()[1] - self.args.max_seq_len
+            } else {
+                0
+            };
+            let idx_cond = if idx.shape()[1] <= self.args.max_seq_len {
+                idx
+            } else {
+                idx.slice(s![.., start_col..]).to_owned()
+            };
+        }
+        todo!()
+    }
 }
 
 // Blocks
@@ -1465,7 +1490,10 @@ mod tests {
         let result = transformer.forward(inp); // batch_sz, seq_len, vocab_size
         assert_eq!(result.ndim(), 3);
         let last_t = result.shape()[1] - 1;
-        let out = result.slice(s![.., last_t..last_t+1, ..]).to_owned().into_dyn();
+        let out = result
+            .slice(s![.., last_t..last_t + 1, ..])
+            .to_owned()
+            .into_dyn();
         assert_abs_diff_eq!(out, expect, epsilon = 1e-3)
     }
 }
