@@ -7,6 +7,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use ndarray::{
     s, Array, Array1, Array2, Array5, ArrayD, ArrayView, Axis, Dim, Ix2, Ix5, IxDyn, IxDynImpl, Zip,
 };
+use rand::distributions::{Distribution, WeightedIndex};
+use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
@@ -412,25 +414,59 @@ impl Transformer {
     /// Also note this is a super inefficient version of sampling with no key/value cache.
     pub fn generate<T: ndarray::Dimension<Larger = Dim<IxDynImpl>> + ndarray::RemoveAxis>(
         &self,
-        idx: Array2<usize>,
+        mut idx: Array2<usize>,
         max_new_tokens: usize,
         temperature: f32,
         top_k: Option<usize>,
     ) -> Array2<usize> {
-        assert_eq!(idx.ndim(), 2);
         for _ in 0..max_new_tokens {
-            let start_col = if idx.shape()[1] > self.args.max_seq_len {
-                idx.shape()[1] - self.args.max_seq_len
+            // if the sequence context is growing too long we must crop it at block_size
+            let seq_len = idx.shape()[1];
+            let start_col = if seq_len > self.args.max_seq_len {
+                seq_len - self.args.max_seq_len
             } else {
                 0
             };
-            let idx_cond = if idx.shape()[1] <= self.args.max_seq_len {
-                idx
+            let idx_cond = if seq_len <= self.args.max_seq_len {
+                idx.clone()
             } else {
                 idx.slice(s![.., start_col..]).to_owned()
             };
+            // forward and slice last time step
+            let logits = self.forward(idx_cond.into_dyn());
+            let last_t = logits.shape()[1] - 1;
+            let mut logits = logits.slice(s![.., last_t, ..]).to_owned();
+            let idx_next = if temperature == 0.0 {
+                //"sample" the single most likely index
+                topk(&logits, 1, Axis(0)).1
+            } else {
+                // pluck the logits at the final step and scale by desired temperature
+                logits = logits / temperature;
+                // optionally crop the logits to only the top k options
+                if let Some(k) = top_k {
+                    let (v, _) = topk(&logits, min(k, logits.shape()[1]), Axis(0));
+                    let last_col_of_v = v.slice(s![.., -1]).to_owned();
+                    let v = last_col_of_v.broadcast(logits.raw_dim()).unwrap();
+                    Zip::from(&mut logits).and(v).for_each(|logit, &b| {
+                        if *logit < b {
+                            *logit = f32::NEG_INFINITY;
+                        }
+                    });
+                }
+                // apply softmax to convert logits to (normalized) probabilities
+                let probs = softmax(&logits.into_dyn(), 1);
+                let mut rng = rand::thread_rng();
+                let mut idx_next_vec = Vec::new();
+                for row in probs.outer_iter() {
+                    let dist = WeightedIndex::new(row.iter().cloned()).unwrap();
+                    let sample = dist.sample(&mut rng);
+                    idx_next_vec.push(sample);
+                }
+                Array2::from_shape_vec((probs.shape()[0], 1), idx_next_vec).unwrap()
+            };
+            idx = ndarray::concatenate(Axis(1), &[idx.view(), idx_next.view()]).unwrap();
         }
-        todo!()
+        idx
     }
 }
 
@@ -946,6 +982,38 @@ fn softmax(x: &ArrayD<f32>, axis: usize) -> ArrayD<f32> {
     e_x / &sum_e_x
 }
 
+fn topk(arr: &Array2<f32>, k: usize, axis: Axis) -> (Array2<f32>, Array2<usize>) {
+    assert!(
+        axis == Axis(0),
+        "This function only supports Axis(0) for simplicity."
+    );
+
+    let (rows, _) = arr.dim();
+
+    // Prepare arrays to store results
+    let mut values = Array2::zeros((rows, k));
+    let mut indices = Array2::zeros((rows, k));
+
+    for (i, view) in arr.axis_iter(axis).enumerate() {
+        let mut combined: Vec<(f32, usize)> = view
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, val)| (val, idx))
+            .collect();
+
+        // Sort in descending order by value
+        combined.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+
+        for j in 0..k {
+            values[[i, j]] = combined[j].0;
+            indices[[i, j]] = combined[j].1;
+        }
+    }
+
+    (values, indices)
+}
+
 fn main() -> Result<()> {
     // Open the file
     let mut f = File::open("stories15M.bin")?;
@@ -1380,6 +1448,29 @@ mod tests {
         let expect =
             ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 3, 4]), SOFTMAX_EXPECT.to_vec()).unwrap();
         assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
+    }
+    #[test]
+    fn test_topk() {
+        // Define a test array
+        let arr = Array2::from_shape_vec(
+            (3, 4),
+            vec![
+                1.0, 5.0, 3.0, 8.0, 7.0, 4.0, 6.0, 2.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+        )
+        .unwrap();
+
+        // Test for k=2
+        let (values, indices) = topk(&arr, 2, Axis(0));
+
+        assert_eq!(
+            values,
+            Array2::from_shape_vec((3, 2), vec![8.0, 5.0, 7.0, 6.0, 12.0, 11.0]).unwrap()
+        );
+        assert_eq!(
+            indices,
+            Array2::from_shape_vec((3, 2), vec![3, 1, 0, 2, 3, 2]).unwrap()
+        );
     }
     #[test]
     fn test_attention() {
