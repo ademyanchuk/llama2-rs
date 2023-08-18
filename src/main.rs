@@ -441,7 +441,7 @@ impl Transformer {
                 topk(&logits, 1, Axis(0)).1
             } else {
                 // pluck the logits at the final step and scale by desired temperature
-                logits = logits / temperature;
+                logits /= temperature;
                 // optionally crop the logits to only the top k options
                 if let Some(k) = top_k {
                     let (v, _) = topk(&logits, min(k, logits.shape()[1]), Axis(0));
