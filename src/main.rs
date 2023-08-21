@@ -436,7 +436,6 @@ impl Transformer {
             let logits = self.forward(idx_cond.into_dyn());
             let last_t = logits.shape()[1] - 1;
             let mut logits = logits.slice(s![.., last_t, ..]).to_owned();
-            println!("{}", logits);
             let idx_next = if temperature == 0.0 {
                 //"sample" the single most likely index
                 topk(&logits, 1, Axis(0)).1
@@ -466,7 +465,8 @@ impl Transformer {
                 Array2::from_shape_vec((probs.shape()[0], 1), idx_next_vec).unwrap()
             };
             idx = ndarray::concatenate(Axis(1), &[idx.view(), idx_next.view()]).unwrap();
-            println!("{}", idx);
+            idx = idx.as_standard_layout().to_owned();
+            assert!(idx.is_standard_layout())
         }
         idx
     }
@@ -1590,7 +1590,7 @@ mod tests {
         assert_abs_diff_eq!(out, expect, epsilon = 1e-3)
     }
     #[test]
-    fn test_transformer_generate() {
+    fn test_transformer_generate_temp_zero() {
         let path = env::current_dir()
             .unwrap()
             .join("tests")
@@ -1598,8 +1598,23 @@ mod tests {
             .join("test_tiny.bin");
         let transformer = Transformer::from(path)
             .expect("should work, if test_import_transformer_from_file passed");
-        let mut idx = Array2::from_shape_vec((2, 2), vec![0_usize, 1, 1, 2]).unwrap();
-        let out = transformer.generate(idx, 2, 0.0, None);
-        assert!(false)
+        let idx = Array2::from_shape_vec((4, 8), TN_INP.to_vec()).unwrap();
+        let expect = Array2::from_shape_vec((4, 11), TN_GEN0_OUT.to_vec()).unwrap();
+        let out = transformer.generate(idx, 3, 0.0, None);
+        assert_eq!(out, expect)
+    }
+    #[test]
+    fn test_transformer_generate_temp_one() {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_tiny.bin");
+        let transformer = Transformer::from(path)
+            .expect("should work, if test_import_transformer_from_file passed");
+        let idx = Array2::from_shape_vec((4, 8), TN_INP.to_vec()).unwrap();
+        let expect = Array2::from_shape_vec((4, 11), TN_GEN0_OUT.to_vec()).unwrap();
+        let out = transformer.generate(idx, 3, 1.0, None);
+        assert_eq!(out, expect)
     }
 }
