@@ -8,6 +8,7 @@ use ndarray::{
     s, Array, Array1, Array2, Array5, ArrayD, ArrayView, Axis, Dim, Ix2, Ix5, IxDyn, IxDynImpl, Zip,
 };
 use rand::distributions::{Distribution, WeightedIndex};
+use rand::Rng;
 use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 use std::fs::File;
@@ -412,8 +413,9 @@ impl Transformer {
     /// Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
     /// the sequence max_new_tokens times, feeding the predictions back into the model each time.
     /// Also note this is a super inefficient version of sampling with no key/value cache.
-    pub fn generate(
+    pub fn generate<R: Rng>(
         &self,
+        rng: &mut R,
         mut idx: Array2<usize>,
         max_new_tokens: usize,
         temperature: f32,
@@ -455,11 +457,10 @@ impl Transformer {
                 }
                 // apply softmax to convert logits to (normalized) probabilities
                 let probs = softmax(&logits.into_dyn(), 1);
-                let mut rng = rand::thread_rng();
                 let mut idx_next_vec = Vec::new();
                 for row in probs.outer_iter() {
                     let dist = WeightedIndex::new(row.iter().cloned()).unwrap();
-                    let sample = dist.sample(&mut rng);
+                    let sample = dist.sample(rng);
                     idx_next_vec.push(sample);
                 }
                 Array2::from_shape_vec((probs.shape()[0], 1), idx_next_vec).unwrap()
@@ -1055,11 +1056,12 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use rand::{rngs::StdRng, SeedableRng};
     use std::env;
 
     use super::*;
     use approx::*;
-    use ndarray::{arr1, ArrayD};
+    use ndarray::{arr1, ArrayBase, ArrayD, OwnedRepr};
     use test_data::*;
 
     #[test]
@@ -1449,6 +1451,9 @@ mod tests {
         let result = softmax(&inp, 3);
         let expect =
             ArrayD::from_shape_vec(ndarray::IxDyn(&[2, 2, 3, 4]), SOFTMAX_EXPECT.to_vec()).unwrap();
+        let res_sum = result.sum_axis(Axis(3));
+        let ones: ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>> = Array::ones(res_sum.raw_dim());
+        assert_abs_diff_eq!(res_sum, ones, epsilon = 1e-3);
         assert_abs_diff_eq!(result, expect, epsilon = 1e-3)
     }
     #[test]
@@ -1600,7 +1605,8 @@ mod tests {
             .expect("should work, if test_import_transformer_from_file passed");
         let idx = Array2::from_shape_vec((4, 8), TN_INP.to_vec()).unwrap();
         let expect = Array2::from_shape_vec((4, 11), TN_GEN0_OUT.to_vec()).unwrap();
-        let out = transformer.generate(idx, 3, 0.0, None);
+        let mut rng = rand::thread_rng();
+        let out = transformer.generate(&mut rng, idx, 3, 0.0, None);
         assert_eq!(out, expect)
     }
     #[test]
@@ -1614,7 +1620,9 @@ mod tests {
             .expect("should work, if test_import_transformer_from_file passed");
         let idx = Array2::from_shape_vec((4, 8), TN_INP.to_vec()).unwrap();
         let expect = Array2::from_shape_vec((4, 11), TN_GEN0_OUT.to_vec()).unwrap();
-        let out = transformer.generate(idx, 3, 1.0, None);
+        let seed = [0; 32];
+        let mut rng = StdRng::from_seed(seed);
+        let out = transformer.generate(&mut rng, idx, 3, 1.0, None);
         assert_eq!(out, expect)
     }
 }
