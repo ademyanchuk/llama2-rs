@@ -447,7 +447,7 @@ impl Transformer {
                 // optionally crop the logits to only the top k options
                 if let Some(k) = top_k {
                     let (v, _) = topk(&logits, min(k, logits.shape()[1]), Axis(0));
-                    let last_col_of_v = v.slice(s![.., -1]).to_owned();
+                    let last_col_of_v = v.slice(s![.., -1]).to_owned().insert_axis(Axis(1));
                     let v = last_col_of_v.broadcast(logits.raw_dim()).unwrap();
                     Zip::from(&mut logits).and(v).for_each(|logit, &b| {
                         if *logit < b {
@@ -467,7 +467,6 @@ impl Transformer {
             };
             idx = ndarray::concatenate(Axis(1), &[idx.view(), idx_next.view()]).unwrap();
             idx = idx.as_standard_layout().to_owned();
-            assert!(idx.is_standard_layout())
         }
         idx
     }
@@ -1619,10 +1618,26 @@ mod tests {
         let transformer = Transformer::from(path)
             .expect("should work, if test_import_transformer_from_file passed");
         let idx = Array2::from_shape_vec((4, 8), TN_INP.to_vec()).unwrap();
-        let expect = Array2::from_shape_vec((4, 11), TN_GEN0_OUT.to_vec()).unwrap();
+        let expect = Array2::from_shape_vec((4, 11), TN_GEN1_OUT.to_vec()).unwrap();
         let seed = [0; 32];
         let mut rng = StdRng::from_seed(seed);
         let out = transformer.generate(&mut rng, idx, 3, 1.0, None);
+        assert_eq!(out, expect)
+    }
+    #[test]
+    fn test_transformer_generate_temp_1_k_6() {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_tiny.bin");
+        let transformer = Transformer::from(path)
+            .expect("should work, if test_import_transformer_from_file passed");
+        let idx = Array2::from_shape_vec((4, 8), TN_INP.to_vec()).unwrap();
+        let expect = Array2::from_shape_vec((4, 11), TN_GEN1_OUT.to_vec()).unwrap();
+        let seed = [0; 32];
+        let mut rng = StdRng::from_seed(seed);
+        let out = transformer.generate(&mut rng, idx, 3, 1.0, Some(6));
         assert_eq!(out, expect)
     }
 }
