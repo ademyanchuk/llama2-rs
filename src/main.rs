@@ -1634,7 +1634,7 @@ mod tests {
         let transformer = Transformer::from(path)
             .expect("should work, if test_import_transformer_from_file passed");
         let idx = Array2::from_shape_vec((4, 8), TN_INP.to_vec()).unwrap();
-        let expect = Array2::from_shape_vec((4, 11), TN_GEN1_OUT.to_vec()).unwrap();
+        let expect = Array2::from_shape_vec((4, 11), TN_GEN1_K_OUT.to_vec()).unwrap();
         let seed = [0; 32];
         let mut rng = StdRng::from_seed(seed);
         let out = transformer.generate(&mut rng, idx, 3, 1.0, Some(6));
