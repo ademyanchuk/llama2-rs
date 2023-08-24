@@ -3,6 +3,7 @@ mod model;
 #[allow(dead_code)]
 #[allow(clippy::approx_constant)]
 mod test_data;
+mod tokenizer;
 
 use anyhow::{Ok, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
