@@ -12,3 +12,9 @@ byteorder = "1.4.3"
 ndarray = { version = "0.15.6", features = ["rayon", "approx-0_5"] }
 rand = "0.8.5"
 sentencepiece = "0.11.2"
+
+[profile.release]
+opt-level = 3  # Highest optimization level
+lto = true     # Link Time Optimizations. Can make your code smaller and faster, but can increase compile time.
+codegen-units = 1  # Reduces parallel code generation which can lead to better optimization but slower compiles.
+panic = 'abort'   # Aborts on panic rather than unwinding. Can lead to smaller binary and faster code but lacks stack unwinding on panic.
