@@ -1,10 +1,3 @@
-#[allow(dead_code)]
-mod model;
-#[allow(dead_code)]
-#[allow(clippy::approx_constant)]
-mod test_data;
-mod tokenizer;
-
 use std::time::Instant;
 
 use anyhow::{Ok, Result};
@@ -12,8 +5,8 @@ use anyhow::{Ok, Result};
 use ndarray::{Array, Axis};
 use rand::{rngs::StdRng, SeedableRng};
 
-use model::Transformer;
-use tokenizer::Tokenizer;
+use llama2_rs::model::Transformer;
+use llama2_rs::tokenizer::Tokenizer;
 
 fn main() -> Result<()> {
     let path = "stories15M.bin";
