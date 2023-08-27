@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
 
-type F32VecMap<'a> = HashMap<&'a str, Vec<f32>>;
+use crate::F32VecMap;
 
 pub struct ModelArgs {
     pub dim: usize,
@@ -1017,10 +1017,10 @@ mod tests {
     use rand::{rngs::StdRng, SeedableRng};
     use std::env;
 
-    use super::*;
+    use crate::model::*;
+    use crate::test_data::*;
     use approx::*;
     use ndarray::{arr1, ArrayBase, ArrayD, OwnedRepr};
-    use crate::test_data::*;
 
     #[test]
     fn test_new_with_valid_inputs() {
@@ -1056,12 +1056,12 @@ mod tests {
         let num_embeddings = 0;
         let embedding_dim = 2;
         let embedding = Embedding::new(data.clone(), num_embeddings, embedding_dim);
-        assert_eq!(embedding.weight, Array2::zeros((0, 2)));
+        assert_eq!(embedding.weight, Array2::<f32>::zeros((0, 2)));
 
         let num_embeddings = 2;
         let embedding_dim = 0;
         let embedding = Embedding::new(data, num_embeddings, embedding_dim);
-        assert_eq!(embedding.weight, Array2::zeros((2, 0)));
+        assert_eq!(embedding.weight, Array2::<f32>::zeros((2, 0)));
     }
     #[test]
     fn test_new_with_large_input() {
