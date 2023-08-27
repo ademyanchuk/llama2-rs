@@ -38,7 +38,7 @@ impl FeedForward {
     }
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let x = (silu(&self.w1.forward(x)?)? * self.w3.forward(x)?)?;
-        Ok(self.w2.forward(&x)?)
+        self.w2.forward(&x)
     }
 }
 
