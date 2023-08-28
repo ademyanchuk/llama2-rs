@@ -1,5 +1,5 @@
-// Same llama.c version of Transformer, but built with HF candle
-use candle_core::{Result, Tensor};
+// Same llama.c version of Transformer, but built with HF candle (mostly copied from candle examples)
+use candle_core::{IndexOp, Result, Tensor, D};
 use candle_nn::linear_no_bias as linear;
 use candle_nn::{ops::silu, Linear, Module, VarBuilder};
 
@@ -29,6 +29,20 @@ impl FeedForward {
 }
 
 // Functions
+fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    let (b_sz, seq_len, h, n_embd) = x.dims4()?;
+    let cos = cos.unsqueeze(1)?;
+    let sin = sin.unsqueeze(1)?;
+    let cos = cos.broadcast_as((b_sz, seq_len, 1, n_embd / 2, 1))?;
+    let sin = sin.broadcast_as((b_sz, seq_len, 1, n_embd / 2, 1))?;
+    let x = x.reshape((b_sz, seq_len, h, n_embd / 2, 2))?;
+    let x0 = x.narrow(D::Minus1, 0, 1)?;
+    let x1 = x.narrow(D::Minus1, 1, 1)?;
+    let dst0 = (x0.broadcast_mul(&cos)? - x1.broadcast_mul(&sin)?)?;
+    let dst1 = (x0.broadcast_mul(&sin)? + x1.broadcast_mul(&cos)?)?;
+    let rope = Tensor::cat(&[&dst0, &dst1], D::Minus1)?.reshape((b_sz, seq_len, h, n_embd))?;
+    Ok(rope)
+}
 
 #[cfg(test)]
 mod tests {
@@ -36,7 +50,11 @@ mod tests {
     use candle_core::{DType, Device};
     use std::collections::HashMap;
 
-    use crate::{cnd_model::*, model::ModelArgsBuilder};
+    use crate::{
+        cnd_model::*,
+        model::ModelArgsBuilder,
+        test_data::{XK_DATA, XK_OUT_EXP_DATA, XQ_DATA, XQ_OUT_EXP_DATA},
+    };
 
     fn approx_eq_nested_vec(a: &Vec<Vec<f32>>, b: &Vec<Vec<f32>>, epsilon: f32) -> bool {
         if a.len() != b.len() {
@@ -55,6 +73,18 @@ mod tests {
             }
         }
 
+        true
+    }
+
+    fn approx_eq_vec(a: &Vec<f32>, b: &Vec<f32>, eps: f32) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for (val_a, val_b) in a.iter().zip(b.iter()) {
+            if !abs_diff_eq!(val_a, val_b, epsilon = eps) {
+                return false;
+            }
+        }
         true
     }
 
@@ -116,6 +146,38 @@ mod tests {
             &y.to_vec2()?,
             &expect.to_vec2()?,
             1e-4
+        ));
+        Ok(())
+    }
+    #[test]
+    fn test_apply_rotary_emb() -> Result<()> {
+        let dev = &Device::Cpu;
+        let shape = (2, 3, 2, 4);
+        let xq = Tensor::from_slice(XQ_DATA, shape, dev)?;
+        let xk = Tensor::from_slice(XK_DATA, shape, dev)?;
+        let freq_cos = Tensor::from_vec(
+            vec![-0.1339f32, -1.4408, -0.7710, 0.4526, -3.0065, 2.3243],
+            (3, 2, 1),
+            dev,
+        )?;
+        let freqs_sin = Tensor::from_vec(
+            vec![0.3798f32, -1.3930, -0.0854, 0.7161, 2.4592, -1.0601],
+            (3, 2, 1),
+            dev,
+        )?;
+        let xq_out = apply_rotary_emb(&xq, &freq_cos, &freqs_sin)?;
+        assert_eq!(xq_out.dims4()?, shape);
+        assert!(approx_eq_vec(
+            &xq_out.flatten_all()?.to_vec1()?,
+            &XQ_OUT_EXP_DATA.to_vec(),
+            1e-3
+        ));
+        let xk_out = apply_rotary_emb(&xk, &freq_cos, &freqs_sin)?;
+        assert_eq!(xq_out.dims4()?, shape);
+        assert!(approx_eq_vec(
+            &xk_out.flatten_all()?.to_vec1()?,
+            &XK_OUT_EXP_DATA.to_vec(),
+            1e-3
         ));
         Ok(())
     }
