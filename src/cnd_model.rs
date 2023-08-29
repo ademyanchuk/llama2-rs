@@ -28,6 +28,27 @@ impl FeedForward {
     }
 }
 
+pub struct Attention {
+    wq: Linear,
+    wk: Linear,
+    wv: Linear,
+    wo: Linear,
+    mask: Tensor,
+    n_heads: usize,
+    n_kv_heads: usize,
+    n_rep: usize,
+    head_dim: usize,
+}
+
+impl Attention {
+    pub fn from(vb: VarBuilder, args: &ModelArgs) -> Result<Self> {
+        todo!()
+    }
+    pub fn forward() {
+        todo!()
+    }
+}
+
 // Functions
 fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let (b_sz, seq_len, h, n_embd) = x.dims4()?;
@@ -44,6 +65,19 @@ fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     Ok(rope)
 }
 
+fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
+    if n_rep == 1 {
+        Ok(x)
+    } else {
+        let (b_sz, seq_len, n_kv_head, head_dim) = x.dims4()?;
+        let x = x
+            .unsqueeze(3)?
+            .expand((b_sz, seq_len, n_kv_head, n_rep, head_dim))?
+            .reshape((b_sz, seq_len, n_kv_head * n_rep, head_dim))?;
+        Ok(x)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use approx::*;
@@ -53,7 +87,7 @@ mod tests {
     use crate::{
         cnd_model::*,
         model::ModelArgsBuilder,
-        test_data::{XK_DATA, XK_OUT_EXP_DATA, XQ_DATA, XQ_OUT_EXP_DATA},
+        test_data::{REP_KV_INP, REP_KV_OUT, XK_DATA, XK_OUT_EXP_DATA, XQ_DATA, XQ_OUT_EXP_DATA},
     };
 
     fn approx_eq_nested_vec(a: &Vec<Vec<f32>>, b: &Vec<Vec<f32>>, epsilon: f32) -> bool {
@@ -179,6 +213,17 @@ mod tests {
             &XK_OUT_EXP_DATA.to_vec(),
             1e-3
         ));
+        Ok(())
+    }
+    #[test]
+    fn test_repeat_kv() -> Result<()> {
+        let x = Tensor::from_slice(REP_KV_INP, (2, 3, 2, 3), &Device::Cpu)?;
+        let repeated = repeat_kv(x, 2)?;
+        assert_eq!(repeated.dims4()?, (2, 3, 4, 3));
+        assert_eq!(
+            &repeated.flatten_all()?.to_vec1::<f32>()?,
+            &REP_KV_OUT.to_vec()
+        );
         Ok(())
     }
 }
