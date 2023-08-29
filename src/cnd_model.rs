@@ -241,6 +241,26 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn test_attention() -> Result<()> {
+        let device = &Device::Cpu;
+        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32);
+        // need it here to build appropriate tensors for Linear layers
+        let n_heads = args.n_heads;
+        let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
+        let head_dim = args.dim / n_heads;
+        let mut weights_data = HashMap::new();
+        let wq = Tensor::from_vec(ATT_WQ.to_vec(), (n_heads * head_dim, args.dim), device)?;
+        let wk = Tensor::from_vec(ATT_WK.to_vec(), (n_kv_heads * head_dim, args.dim), device)?;
+        let wv = Tensor::from_vec(ATT_WV.to_vec(), (n_kv_heads * head_dim, args.dim), device)?;
+        let wo = Tensor::from_vec(ATT_WO.to_vec(), (args.dim, n_heads * head_dim), device)?;
+        weights_data.insert("wq.weight".to_string(), wq);
+        weights_data.insert("wk.weight".to_string(), wk);
+        weights_data.insert("wv.weight".to_string(), wv);
+        weights_data.insert("wo.weight".to_string(), wo);
+        let vb = VarBuilder::from_tensors(weights_data, DType::F32, device);
+        Ok(())
+    }
+    #[test]
     fn test_apply_rotary_emb() -> Result<()> {
         let dev = &Device::Cpu;
         let shape = (2, 3, 2, 4);
