@@ -1,7 +1,8 @@
 // Same llama.c version of Transformer, but built with HF candle (mostly copied from candle examples)
-use candle_core::{IndexOp, Result, Tensor, D};
+use candle_core::{Device, IndexOp, Result, Tensor, D};
 use candle_nn::linear_no_bias as linear;
-use candle_nn::{ops::silu, Linear, Module, VarBuilder};
+use candle_nn::ops::{silu, softmax};
+use candle_nn::{Linear, Module, VarBuilder};
 
 use crate::model::ModelArgs;
 //Blocks
@@ -42,10 +43,59 @@ pub struct Attention {
 
 impl Attention {
     pub fn from(vb: VarBuilder, args: &ModelArgs) -> Result<Self> {
-        todo!()
+        let n_heads = args.n_heads;
+        let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
+        let n_rep = n_heads / n_kv_heads;
+        let head_dim = args.dim / n_heads;
+        let wq = linear(args.dim, n_heads * head_dim, vb.pp("wq"))?;
+        let wk = linear(args.dim, n_kv_heads * head_dim, vb.pp("wk"))?;
+        let wv = linear(args.dim, n_kv_heads * head_dim, vb.pp("wv"))?;
+        let wo = linear(n_heads * head_dim, args.dim, vb.pp("wo"))?;
+        let mask = triu_mask(args.max_seq_len, &vb.device().clone())?;
+        Ok(Attention {
+            wq,
+            wk,
+            wv,
+            wo,
+            mask,
+            n_heads,
+            n_kv_heads,
+            n_rep,
+            head_dim,
+        })
     }
-    pub fn forward() {
-        todo!()
+    pub fn forward(&self, x: &Tensor, freqs_cos: &Tensor, freqs_sin: &Tensor) -> Result<Tensor> {
+        let (b_sz, seq_len, n_embd) = x.dims3()?;
+        // QKV
+        let xq = self.wq.forward(x)?;
+        let xk = self.wk.forward(x)?;
+        let xv = self.wv.forward(x)?;
+
+        let xq = xq.reshape((b_sz, seq_len, self.n_heads, self.head_dim))?;
+        let xk = xk.reshape((b_sz, seq_len, self.n_kv_heads, self.head_dim))?;
+        let xv = xv.reshape((b_sz, seq_len, self.n_kv_heads, self.head_dim))?;
+
+        // RoPE relative positional embeddings
+        let xq = apply_rotary_emb(&xq, freqs_cos, freqs_sin)?;
+        let xk = apply_rotary_emb(&xk, freqs_cos, freqs_sin)?;
+
+        // grouped multiquery attention: expand out keys and values
+        let xk = repeat_kv(xk, self.n_rep)?; // (bs, seqlen, n_heads, head_dim)
+        let xv = repeat_kv(xv, self.n_rep)?;
+
+        // make heads into a batch dimension
+        let xq = xq.transpose(1, 2)?.contiguous()?; // (bs, n_heads, seqlen, head_dim)
+        let xk = xk.transpose(1, 2)?.contiguous()?;
+        let xv = xv.transpose(1, 2)?.contiguous()?;
+
+        let scores = (xq.matmul(&xk.t()?)? / (self.head_dim as f64).sqrt())?;
+        let scores = scores.broadcast_add(&self.mask.i((.., .., ..seq_len, ..seq_len))?)?;
+        let scores = softmax(&scores, D::Minus1)?;
+        // out will be (bs, n_heads, seqlen, head_dim)
+        let out = scores.matmul(&xv.contiguous()?)?;
+        // restore time as batch dimension and concat heads
+        let out = out.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
+        self.wo.forward(&out)
     }
 }
 
@@ -78,17 +128,24 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     }
 }
 
+fn triu_mask(t: usize, device: &Device) -> Result<Tensor> {
+    let mut mask = vec![vec![f32::NEG_INFINITY; t]; t];
+    for i in 0..t {
+        for j in 0..=i {
+            mask[i][j] = 0.0;
+        }
+    }
+    let mask = Tensor::from_iter(mask.into_iter().flatten(), device)?;
+    mask.reshape((1, 1, t, t))
+}
+
 #[cfg(test)]
 mod tests {
     use approx::*;
     use candle_core::{DType, Device};
     use std::collections::HashMap;
 
-    use crate::{
-        cnd_model::*,
-        model::ModelArgsBuilder,
-        test_data::{REP_KV_INP, REP_KV_OUT, XK_DATA, XK_OUT_EXP_DATA, XQ_DATA, XQ_OUT_EXP_DATA},
-    };
+    use crate::{cnd_model::*, model::ModelArgsBuilder, test_data::*};
 
     fn approx_eq_nested_vec(a: &Vec<Vec<f32>>, b: &Vec<Vec<f32>>, epsilon: f32) -> bool {
         if a.len() != b.len() {
@@ -223,6 +280,26 @@ mod tests {
         assert_eq!(
             &repeated.flatten_all()?.to_vec1::<f32>()?,
             &REP_KV_OUT.to_vec()
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_triu_mask() -> Result<()> {
+        let mask = triu_mask(3, &Device::Cpu)?;
+        assert_eq!(mask.dims4()?, (1, 1, 3, 3));
+        assert_eq!(
+            mask.flatten_all()?.to_vec1::<f32>()?,
+            vec![
+                0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                0.0,
+                0.0,
+                f32::NEG_INFINITY,
+                0.0,
+                0.0,
+                0.0,
+            ],
         );
         Ok(())
     }
