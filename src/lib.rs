@@ -1,4 +1,5 @@
 pub mod cnd_model;
+pub mod cnd_weights;
 #[allow(dead_code)]
 pub mod model;
 #[allow(dead_code)]

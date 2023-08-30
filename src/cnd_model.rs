@@ -6,6 +6,7 @@ use candle_nn::{rms_norm, Linear, Module, RmsNorm, VarBuilder};
 use crate::model::ModelArgs;
 // Same llama.c version of Transformer,
 // but built with HF candle (mostly copied from candle examples)
+// what's where prefix cnd_ comes from
 
 //Blocks
 pub struct TransformerBlock {
