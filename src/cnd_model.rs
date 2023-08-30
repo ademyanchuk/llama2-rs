@@ -1,10 +1,11 @@
-// Same llama.c version of Transformer, but built with HF candle (mostly copied from candle examples)
 use candle_core::{Device, IndexOp, Result, Tensor, D};
 use candle_nn::linear_no_bias as linear;
 use candle_nn::ops::{silu, softmax};
 use candle_nn::{Linear, Module, VarBuilder};
 
 use crate::model::ModelArgs;
+// Same llama.c version of Transformer,
+// but built with HF candle (mostly copied from candle examples)
 //Blocks
 pub struct FeedForward {
     w1: Linear,
@@ -101,6 +102,7 @@ impl Attention {
 
 // Functions
 fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    // candle implementation requires cos and sin to have 3 dims, last one is 1
     let (b_sz, seq_len, h, n_embd) = x.dims4()?;
     let cos = cos.unsqueeze(1)?;
     let sin = sin.unsqueeze(1)?;
@@ -130,9 +132,9 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
 
 fn triu_mask(t: usize, device: &Device) -> Result<Tensor> {
     let mut mask = vec![vec![f32::NEG_INFINITY; t]; t];
-    for i in 0..t {
-        for j in 0..=i {
-            mask[i][j] = 0.0;
+    for (i, row) in mask.iter_mut().enumerate().take(t) {
+        for val in row.iter_mut().take(i+1) {
+            *val = 0.0;
         }
     }
     let mask = Tensor::from_iter(mask.into_iter().flatten(), device)?;
@@ -248,6 +250,7 @@ mod tests {
         let n_heads = args.n_heads;
         let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
         let head_dim = args.dim / n_heads;
+        // init attention
         let mut weights_data = HashMap::new();
         let wq = Tensor::from_vec(ATT_WQ.to_vec(), (n_heads * head_dim, args.dim), device)?;
         let wk = Tensor::from_vec(ATT_WK.to_vec(), (n_kv_heads * head_dim, args.dim), device)?;
@@ -258,6 +261,31 @@ mod tests {
         weights_data.insert("wv.weight".to_string(), wv);
         weights_data.insert("wo.weight".to_string(), wo);
         let vb = VarBuilder::from_tensors(weights_data, DType::F32, device);
+        let att = Attention::from(vb, &args)?;
+
+        // init inputs
+        let seq_len = 4_usize;
+        let inp = Tensor::from_slice(ATT_INP_FLAT, (2, seq_len, args.dim), device)?;
+        let freqs_cos = Tensor::from_slice(
+            ATT_FREQ_COS_FLAT,
+            (args.max_seq_len, args.dim / args.n_heads / 2, 1),
+            device,
+        )?;
+        let freqs_cos = freqs_cos.i((..seq_len, .., ..))?;
+        let freqs_sin = Tensor::from_slice(
+            ATT_FREQ_SIN_FLAT,
+            (args.max_seq_len, args.dim / args.n_heads / 2, 1),
+            device,
+        )?;
+        let freqs_sin = freqs_sin.i((..seq_len, .., ..))?;
+        // check results
+        let result = att.forward(&inp, &freqs_cos, &freqs_sin)?;
+        assert_eq!(result.dims3()?, (2, seq_len, args.dim));
+        assert!(approx_eq_vec(
+            &result.flatten_all()?.to_vec1()?,
+            &ATT_OUT_FLAT.to_vec(),
+            1e-3
+        ));
         Ok(())
     }
     #[test]
