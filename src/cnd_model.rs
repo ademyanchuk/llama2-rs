@@ -1,12 +1,42 @@
 use candle_core::{Device, IndexOp, Result, Tensor, D};
 use candle_nn::linear_no_bias as linear;
 use candle_nn::ops::{silu, softmax};
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::{rms_norm, Linear, Module, RmsNorm, VarBuilder};
 
 use crate::model::ModelArgs;
 // Same llama.c version of Transformer,
 // but built with HF candle (mostly copied from candle examples)
+
 //Blocks
+pub struct TransformerBlock {
+    attention: Attention,
+    feed_forward: FeedForward,
+    attn_norm: RmsNorm,
+    ffd_norm: RmsNorm,
+}
+impl TransformerBlock {
+    pub fn from(vb: VarBuilder, args: &ModelArgs) -> Result<TransformerBlock> {
+        let attention = Attention::from(vb.pp("attn"), args)?;
+        let feed_forward = FeedForward::from(vb.pp("ffd"), args)?;
+        let attn_norm = rms_norm(args.dim, args.norm_eps as f64, vb.pp("attn_norm"))?;
+        let ffd_norm = rms_norm(args.dim, args.norm_eps as f64, vb.pp("ffd_norm"))?;
+        Ok(TransformerBlock {
+            attention,
+            feed_forward,
+            attn_norm,
+            ffd_norm,
+        })
+    }
+    pub fn forward(&self, x: &Tensor, freqs_cos: &Tensor, freqs_sin: &Tensor) -> Result<Tensor> {
+        let residual = x;
+        let x = (residual
+            + self
+                .attention
+                .forward(&self.attn_norm.forward(x)?, freqs_cos, freqs_sin)?)?;
+        let residual = &x;
+        residual + self.feed_forward.forward(&self.ffd_norm.forward(&x)?)
+    }
+}
 pub struct FeedForward {
     w1: Linear,
     w2: Linear,
@@ -133,7 +163,7 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
 fn triu_mask(t: usize, device: &Device) -> Result<Tensor> {
     let mut mask = vec![vec![f32::NEG_INFINITY; t]; t];
     for (i, row) in mask.iter_mut().enumerate().take(t) {
-        for val in row.iter_mut().take(i+1) {
+        for val in row.iter_mut().take(i + 1) {
             *val = 0.0;
         }
     }
@@ -180,7 +210,84 @@ mod tests {
         }
         true
     }
-
+    #[test]
+    fn test_transformer_block() -> Result<()> {
+        let d = &Device::Cpu;
+        let args = ModelArgsBuilder::new()
+            .dim(8)
+            .n_heads(2)
+            .hidden_dim(32)
+            .norm_eps(1e-5)
+            .max_seq_len(32)
+            .build();
+        let n_heads = args.n_heads;
+        let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
+        let head_dim = args.dim / n_heads;
+        // build a block
+        let mut weights = HashMap::new();
+        weights.insert(
+            "attn.wq.weight".to_string(),
+            Tensor::from_slice(TB_ATT_WQ, (n_heads * head_dim, args.dim), d)?,
+        );
+        weights.insert(
+            "attn.wk.weight".to_string(),
+            Tensor::from_slice(TB_ATT_WK, (n_kv_heads * head_dim, args.dim), d)?,
+        );
+        weights.insert(
+            "attn.wv.weight".to_string(),
+            Tensor::from_slice(TB_ATT_WV, (n_kv_heads * head_dim, args.dim), d)?,
+        );
+        weights.insert(
+            "attn.wo.weight".to_string(),
+            Tensor::from_slice(TB_ATT_WO, (args.dim, n_heads * head_dim), d)?,
+        );
+        weights.insert(
+            "attn_norm.weight".to_string(),
+            Tensor::from_slice(TB_ATT_RMS, args.dim, d)?,
+        );
+        weights.insert(
+            "ffd.w1.weight".to_string(),
+            Tensor::from_slice(TB_FFN_W1, (args.hidden_dim, args.dim), d)?,
+        );
+        weights.insert(
+            "ffd.w2.weight".to_string(),
+            Tensor::from_slice(TB_FFN_W2, (args.dim, args.hidden_dim), d)?,
+        );
+        weights.insert(
+            "ffd.w3.weight".to_string(),
+            Tensor::from_slice(TB_FFN_W3, (args.hidden_dim, args.dim), d)?,
+        );
+        weights.insert(
+            "ffd_norm.weight".to_string(),
+            Tensor::from_slice(TB_FFN_RMS, args.dim, d)?,
+        );
+        let vb = VarBuilder::from_tensors(weights, DType::F32, d);
+        let block = TransformerBlock::from(vb, &args)?;
+        // input
+        // init inputs
+        let seq_len = 4_usize;
+        let inp = Tensor::from_slice(TB_INP, (2, seq_len, args.dim), d)?;
+        let freqs_cos = Tensor::from_slice(
+            TB_FREQS_COS,
+            (args.max_seq_len, args.dim / args.n_heads / 2, 1),
+            d,
+        )?;
+        let freqs_cos = freqs_cos.i((..seq_len, .., ..))?;
+        let freqs_sin = Tensor::from_slice(
+            TB_FREQS_SIN,
+            (args.max_seq_len, args.dim / args.n_heads / 2, 1),
+            d,
+        )?;
+        let freqs_sin = freqs_sin.i((..seq_len, .., ..))?;
+        let result = block.forward(&inp, &freqs_cos, &freqs_sin)?;
+        assert_eq!(result.dims3()?, (2, seq_len, args.dim));
+        assert!(approx_eq_vec(
+            &result.flatten_all()?.to_vec1()?,
+            &TB_OUT.to_vec(),
+            1e-3
+        ));
+        Ok(())
+    }
     #[test]
     fn test_feed_forward() -> Result<()> {
         let args = ModelArgsBuilder::new().dim(3).hidden_dim(4).build();
