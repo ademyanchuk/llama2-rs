@@ -24,6 +24,7 @@ pub struct ModelArgs {
     pub max_seq_len: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl ModelArgs {
     pub fn new(
         dim: usize,
@@ -73,6 +74,7 @@ pub struct ModelArgsBuilder {
     norm_eps: Option<f32>,
     max_seq_len: Option<usize>,
 }
+#[allow(clippy::new_without_default)]
 impl ModelArgsBuilder {
     pub fn new() -> Self {
         ModelArgsBuilder {

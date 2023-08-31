@@ -1,12 +1,61 @@
-use candle_core::{Device, IndexOp, Result, Tensor, D};
-use candle_nn::linear_no_bias as linear;
+use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
-use candle_nn::{rms_norm, Linear, Module, RmsNorm, VarBuilder};
+use candle_nn::{
+    embedding, linear_no_bias as linear, rms_norm, Embedding, Linear, Module, RmsNorm, VarBuilder,
+};
 
 use crate::model::ModelArgs;
 // Same llama.c version of Transformer,
 // but built with HF candle (mostly copied from candle examples)
 // what's where prefix cnd_ comes from
+
+// Model
+pub struct Transformer {
+    tok_embeddings: Embedding,
+    layers: Vec<TransformerBlock>,
+    norm: RmsNorm,
+    output: Linear,
+    freqs_cos: Tensor,
+    freqs_sin: Tensor,
+}
+impl Transformer {
+    pub fn from(vb: VarBuilder, args: &ModelArgs) -> Result<Transformer> {
+        let tok_embeddings = embedding(args.vocab_size, args.dim, vb.pp("embed"))?;
+        let output = linear(args.dim, args.vocab_size, vb.pp("lm_head"))?;
+        let norm = rms_norm(args.dim, args.norm_eps as f64, vb.pp("final_norm"))?;
+        let layers: Vec<_> = (0..args.n_layers)
+            .map(|i| TransformerBlock::from(vb.pp(&format!("layers.{i}")), args).unwrap())
+            .collect();
+        let freqs_cos = vb
+            .get((args.max_seq_len, args.dim / args.n_heads / 2), "freqs_cos")
+            .expect("freqs_cos expected");
+        let freqs_sin = vb
+            .get((args.max_seq_len, args.dim / args.n_heads / 2), "freqs_sin")
+            .expect("freqs_sin expected");
+        let freqs_cos = freqs_cos.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_sin = freqs_sin.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        Ok(Transformer {
+            tok_embeddings,
+            layers,
+            norm,
+            output,
+            freqs_cos,
+            freqs_sin,
+        })
+    }
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let (_, seq_len) = x.dims2()?;
+        let mut h = self.tok_embeddings.forward(x)?;
+        let freqs_cos = self.freqs_cos.i((..seq_len, .., ..))?;
+        let freqs_sin = self.freqs_sin.i((..seq_len, .., ..))?;
+        for layer in self.layers.iter() {
+            h = layer.forward(&h, &freqs_cos, &freqs_sin)?;
+        }
+        h = self.norm.forward(&h)?;
+        let logits = self.output.forward(&h)?;
+        logits.to_dtype(DType::F32) // not sure if conversion required
+    }
+}
 
 //Blocks
 pub struct TransformerBlock {
