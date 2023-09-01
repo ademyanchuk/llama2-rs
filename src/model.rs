@@ -13,6 +13,7 @@ use std::path::Path;
 
 use crate::F32VecMap;
 
+#[derive(Debug)]
 pub struct ModelArgs {
     pub dim: usize,
     pub n_layers: usize,
@@ -145,7 +146,7 @@ impl ModelArgsBuilder {
 
 // Model
 pub struct Transformer {
-    args: ModelArgs,
+    pub args: ModelArgs,
     tok_embeddings: Embedding,
     layers: Vec<TransformerBlock>,
     norm: RMSNorm,
@@ -1600,5 +1601,15 @@ mod tests {
         let mut rng = StdRng::from_seed(seed);
         let out = transformer.generate(&mut rng, idx, 3, 1.0, Some(6));
         assert_eq!(out, expect)
+    }
+    #[test]
+    fn test_dummy() {
+        let path = "stories15M.bin";
+        let transformer = Transformer::from(path).expect("model load failed");
+        let hi = transformer.args.vocab_size;
+        let shape = (1, 256);
+        let x = Array::from_shape_fn(shape, |_| rand::thread_rng().gen_range(0..hi)).into_dyn();
+        let _ = transformer.forward(x);
+        assert!(true)
     }
 }
