@@ -1,6 +1,6 @@
 // I reuse a lot of conveniences from candle llama2 example
 // Here is everything about reading from .bin Karpathy's exports
-use anyhow::Result;
+use anyhow::Result; // some functions mix tensor and reading potential errors, that;s why anyhow
 use byteorder::{LittleEndian, ReadBytesExt};
 use candle_core::{DType, Device, IndexOp, Shape, Tensor};
 use candle_nn::VarBuilder;
@@ -106,7 +106,11 @@ impl TransformerWeights {
         })
     }
     // copied from candle examples to reuse VarBuilder in model loading
-    pub fn var_builder(&self, cfg: &ModelArgs, device: &Device) -> Result<VarBuilder<'static>> {
+    pub fn var_builder(
+        &self,
+        cfg: &ModelArgs,
+        device: &Device,
+    ) -> candle_core::error::Result<VarBuilder<'static>> {
         // TODO: As of 2023-08-04, gemm is slower than expected when multiplying a matrix of
         // size (1, k) with the transpose of a matrix of size (k, n) as it ends up transposing the
         // second matrix back. We detect this case here and as a temporary hack make the weight
