@@ -225,9 +225,11 @@ fn triu_mask(t: usize, device: &Device) -> Result<Tensor> {
 mod tests {
     use approx::*;
     use candle_core::{DType, Device};
-    use std::collections::HashMap;
+    use std::{collections::HashMap, env, fs::File};
 
-    use crate::{cnd_model::*, model::ModelArgsBuilder, test_data::*};
+    use crate::{
+        cnd_model::*, cnd_weights::TransformerWeights, model::ModelArgsBuilder, test_data::*,
+    };
 
     fn approx_eq_nested_vec(a: &Vec<Vec<f32>>, b: &Vec<Vec<f32>>, epsilon: f32) -> bool {
         if a.len() != b.len() {
@@ -259,6 +261,48 @@ mod tests {
             }
         }
         true
+    }
+    #[test]
+    fn test_transformer_from() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_tiny.bin");
+        let dev = &Device::Cpu;
+        let mut f = File::open(path)?;
+        let args = ModelArgs::from_reader(&mut f)?;
+        let ws = TransformerWeights::from_reader(&mut f, &args, dev)?;
+        let vb = ws.var_builder(&args, dev)?;
+        assert!(Transformer::from(vb, &args).is_ok());
+        Ok(())
+    }
+    #[test]
+    fn test_transformer_forward() -> Result<()> {
+        // setup
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_tiny.bin");
+        let dev = &Device::Cpu;
+        let mut f = File::open(path).expect("test_tiny.bin file is expected");
+        let args = ModelArgs::from_reader(&mut f).expect("read model args failed");
+        let ws =
+            TransformerWeights::from_reader(&mut f, &args, dev).expect("read model weights failed");
+        let vb = ws.var_builder(&args, dev)?;
+        let trns = Transformer::from(vb, &args)?;
+        let x = TN_INP.iter().map(|&v| v as u32).collect();
+        let x = Tensor::from_vec(x, (4, 8), dev)?;
+        let y = trns.forward(&x)?;
+        assert_eq!(y.dims3()?, (4, 8, 32));
+        let t_last = y.i((.., 7, ..))?;
+        assert!(approx_eq_vec(
+            &t_last.flatten_all()?.to_vec1()?,
+            &TN_OUT.to_vec(),
+            1e-3
+        ));
+        Ok(())
     }
     #[test]
     fn test_transformer_block() -> Result<()> {
