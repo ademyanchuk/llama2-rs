@@ -1,13 +1,26 @@
+use std::fs::File;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ndarray::prelude::*;
 use ndarray_rand::RandomExt;
 use rand::distributions::Uniform;
+use rand::rngs::StdRng;
 use rand::Rng;
+use rand::SeedableRng;
 
 use candle_core::{Device, Tensor};
 use candle_nn::Module;
 
 use llama2_rs::model::Linear;
+use llama2_rs::{cnd_model, cnd_weights, model};
+
+fn model_config() -> Criterion {
+    Criterion::default().measurement_time(std::time::Duration::new(15, 3))
+}
+
+fn default_config() -> Criterion {
+    Criterion::default()
+}
 
 fn generate_random_array<I>(shape: I) -> Array<f32, I::Dim>
 where
@@ -54,9 +67,56 @@ pub fn benchmark_candle_linear_forward(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    benchmark_linear_forward,
-    benchmark_candle_linear_forward
-);
-criterion_main!(benches);
+pub fn benchmark_ndarray_model(c: &mut Criterion) {
+    c.bench_function("ndarray_model", |b| {
+        // Setup
+        let path = "stories15M.bin";
+        let transformer = model::Transformer::from(path).expect("model load failed");
+        let shape = (1, 256); // max_seq_len
+        let hi = transformer.args.vocab_size;
+        let seed = [42; 32];
+        let mut rng = StdRng::from_seed(seed);
+
+        b.iter(|| {
+            let x = Array::from_shape_fn(shape, |_| rng.gen_range(0..hi)).into_dyn();
+            transformer.forward(black_box(x))
+        })
+    });
+}
+
+pub fn benchmark_candle_model(c: &mut Criterion) {
+    c.bench_function("candle_model", |b| {
+        // Setup
+        let path = "stories15M.bin";
+        let dev = &Device::Cpu;
+        let mut f = File::open(path).expect("stories.bin file is expected");
+        let args = model::ModelArgs::from_reader(&mut f).expect("read model args failed");
+        let ws = cnd_weights::TransformerWeights::from_reader(&mut f, &args, dev)
+            .expect("read model weights failed");
+        let vb = ws.var_builder(&args, dev).expect("var builder failed");
+        let trns = cnd_model::Transformer::from(vb, &args).expect("model load failed");
+        let shape = (1, 256);
+        let hi = args.vocab_size as u32;
+        let seed = [42; 32];
+        let mut rng = StdRng::from_seed(seed);
+
+        b.iter(|| {
+            let x: Vec<_> = (0..256).map(|_| rng.gen_range(0..hi)).collect();
+            let x = Tensor::from_vec(x, shape, dev).expect("x failed");
+            trns.forward(black_box(&x))
+        })
+    });
+}
+
+criterion_group! {
+    name = default_benches;
+    config = default_config();
+    targets = benchmark_linear_forward, benchmark_candle_linear_forward
+}
+
+criterion_group! {
+    name = model_benches;
+    config = model_config();
+    targets = benchmark_ndarray_model, benchmark_candle_model
+}
+criterion_main!(default_benches, model_benches);
