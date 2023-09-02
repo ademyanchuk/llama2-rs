@@ -15,7 +15,7 @@ use llama2_rs::model::Linear;
 use llama2_rs::{cnd_model, cnd_weights, model};
 
 fn model_config() -> Criterion {
-    Criterion::default().measurement_time(std::time::Duration::new(15, 3))
+    Criterion::default().measurement_time(std::time::Duration::new(20, 0))
 }
 
 fn default_config() -> Criterion {
