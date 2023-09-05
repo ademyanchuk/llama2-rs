@@ -3,6 +3,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use anyhow::{Ok, Result};
+use clap::{Parser, Subcommand};
 
 use candle_core::{Device, IndexOp, Tensor};
 
@@ -12,14 +13,69 @@ use llama2_rs::model::ModelArgs;
 use llama2_rs::sampler::LogitsSampler;
 use tokenizers::Tokenizer;
 
-fn generate() -> Result<()> {
+fn temp_in_range(s: &str) -> Result<f64, String> {
+    let temp: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` isn't a floating point number"))?;
+    if temp < 0.0 {
+        Err("temperature not in range [0,inf]".to_string())
+    } else {
+        Result::Ok(temp)
+    }
+}
+fn topp_in_range(s: &str) -> Result<f64, String> {
+    let topp: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` isn't a floating point number"))?;
+    if (0.0..=1.0).contains(&topp) {
+        Result::Ok(topp)
+    } else {
+        Err("top-p value not in range [0,1]".to_string())
+    }
+}
+#[derive(Parser, Debug, Clone)]
+struct GenerateCmd {
+    /// temperature in [0,inf], 1.0 = no change, < 1.0 = less random, > 1.0 = more random
+    #[arg(long, short, default_value_t = 1.0, value_parser = temp_in_range)]
+    temperature: f64,
+
+    /// p value in top-p (nucleus) sampling in [0,1]
+    #[arg(short, default_value_t = 0.9, value_parser = topp_in_range)]
+    p: f64,
+
+    /// number of steps to run for, default 256. 0 = max_seq_len
+    #[arg(long, short, default_value_t = 256)]
+    num_steps: usize,
+
+    /// input prompt
+    #[arg(long, short, default_value = "")]
+    input: String,
+}
+#[derive(Parser, Debug, Clone)]
+struct ChatCmd {}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Task {
+    Generate(GenerateCmd),
+    Chat(ChatCmd),
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+pub struct Args {
+    /// mode: generate|chat, default: generate
+    #[command(subcommand)]
+    mode: Option<Task>,
+}
+
+fn generate(args: &GenerateCmd) -> Result<()> {
     // hardcode for now, TODO: CLI as in original repo
     let path = "stories15M.bin";
     let tok_path = "tokenizer.json";
-    let prompt = "One day, Lily met a";
-    let max_new_tokens = 100; // number of tokens generated in each sample
-    let temperature = 1.0; // 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-    let top_p = 0.9; // nuclear sampling (sample from only top_p probabilities)
+    let prompt = args.input.clone();
+    let mut max_new_tokens = args.num_steps; // number of tokens generated in each sample
+    let temperature = args.temperature; // 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+    let top_p = args.p; // nuclear sampling (sample from only top_p probabilities)
 
     // Load the model
     let device = &Device::Cpu;
@@ -29,12 +85,21 @@ fn generate() -> Result<()> {
     let vb = ws.var_builder(&args, device)?;
     let transformer = Transformer::from(vb, &args)?;
 
+    // update max_new_tokens to be in range
+    if max_new_tokens == 0 || max_new_tokens > args.max_seq_len {
+        max_new_tokens = args.max_seq_len;
+    }
+
     // tokenizer and sampler
     // To avoid rewriting the tokenizer myself, I utilize hugging face tokenizer library
     // We need tokenizer.json from https://huggingface.co/hf-internal-testing/llama-tokenizer/tree/main
     // or alternatively can use api as in candle llama-2 example
     let enc = Tokenizer::from_file(tok_path).expect("tokenizer loading failed");
-    let mut sampler = LogitsSampler::new(13, Some(temperature), Some(top_p));
+    let mut sampler = LogitsSampler::new(
+        13,
+        Some(temperature),
+        if top_p > 0.0 { Some(top_p) } else { None }, // switch top-p off if value is 0.0
+    );
 
     print!("{}", prompt);
 
@@ -88,5 +153,13 @@ fn generate() -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    generate()
+    let args = Args::parse();
+    match &args.mode {
+        None => {
+            let cmd = GenerateCmd::parse();
+            generate(&cmd)
+        }
+        Some(Task::Generate(cmd)) => generate(cmd),
+        Some(Task::Chat(_)) => todo!(),
+    }
 }
