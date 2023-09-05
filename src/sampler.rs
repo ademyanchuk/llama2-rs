@@ -65,7 +65,6 @@ fn sample_topp(probs: Vec<f32>, topp: f64, rng: &mut rand::rngs::StdRng) -> u32 
         .map(|(idx, &p)| (idx, p))
         .collect();
     prob_index.sort_unstable_by(|(_, u), (_, v)| v.total_cmp(u)); // non-increasing order
-    println!("{:?}", &prob_index);
 
     // build a prefix-sum vector with accumulated probs, then pick up to cumulative p <= topp
     let cumulative = prob_index.iter().scan(0.0f32, |acc, item| {
