@@ -1,4 +1,6 @@
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use std::sync::{Arc, Mutex};
+
+use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
 use candle_nn::{
     embedding, linear_no_bias as linear, rms_norm, Embedding, Linear, Module, RmsNorm, VarBuilder,
@@ -9,6 +11,7 @@ use crate::model::ModelArgs;
 // but built with HF candle (mostly copied from candle examples)
 // what's where prefix cnd_ comes from
 
+pub type Cache = Arc<Mutex<Vec<Option<(Tensor, Tensor)>>>>;
 // Model
 pub struct Transformer {
     tok_embeddings: Embedding,
@@ -17,6 +20,8 @@ pub struct Transformer {
     output: Linear,
     freqs_cos: Tensor,
     freqs_sin: Tensor,
+    #[allow(clippy::type_complexity)]
+    cache: Cache,
 }
 impl Transformer {
     pub fn from(vb: VarBuilder, args: &ModelArgs) -> Result<Transformer> {
@@ -41,15 +46,17 @@ impl Transformer {
             output,
             freqs_cos,
             freqs_sin,
+            cache: Arc::new(Mutex::new(vec![None; args.n_layers])),
         })
     }
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub fn forward(&mut self, x: &Tensor, pos_idx: usize) -> Result<Tensor> {
         let (_, seq_len) = x.dims2()?;
         let mut h = self.tok_embeddings.forward(x)?;
-        let freqs_cos = self.freqs_cos.i((..seq_len, .., ..))?;
-        let freqs_sin = self.freqs_sin.i((..seq_len, .., ..))?;
-        for layer in self.layers.iter() {
-            h = layer.forward(&h, &freqs_cos, &freqs_sin)?;
+        // index into correct position of freqs here
+        let freqs_cos = self.freqs_cos.i((pos_idx..pos_idx + seq_len, .., ..))?;
+        let freqs_sin = self.freqs_sin.i((pos_idx..pos_idx + seq_len, .., ..))?;
+        for (block_idx, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h, &freqs_cos, &freqs_sin, block_idx, &mut self.cache)?;
         }
         h = self.norm.forward(&h)?;
         let logits = self.output.forward(&h)?;
@@ -77,12 +84,23 @@ impl TransformerBlock {
             ffd_norm,
         })
     }
-    pub fn forward(&self, x: &Tensor, freqs_cos: &Tensor, freqs_sin: &Tensor) -> Result<Tensor> {
+    pub fn forward(
+        &self,
+        x: &Tensor,
+        freqs_cos: &Tensor,
+        freqs_sin: &Tensor,
+        block_idx: usize,
+        cache: &mut Cache,
+    ) -> Result<Tensor> {
         let residual = x;
         let x = (residual
-            + self
-                .attention
-                .forward(&self.attn_norm.forward(x)?, freqs_cos, freqs_sin)?)?;
+            + self.attention.forward(
+                &self.attn_norm.forward(x)?,
+                freqs_cos,
+                freqs_sin,
+                block_idx,
+                cache,
+            )?)?;
         let residual = &x;
         residual + self.feed_forward.forward(&self.ffd_norm.forward(&x)?)
     }
@@ -115,7 +133,6 @@ pub struct Attention {
     wk: Linear,
     wv: Linear,
     wo: Linear,
-    mask: Tensor,
     n_heads: usize,
     n_kv_heads: usize,
     n_rep: usize,
@@ -132,20 +149,25 @@ impl Attention {
         let wk = linear(args.dim, n_kv_heads * head_dim, vb.pp("wk"))?;
         let wv = linear(args.dim, n_kv_heads * head_dim, vb.pp("wv"))?;
         let wo = linear(n_heads * head_dim, args.dim, vb.pp("wo"))?;
-        let mask = triu_mask(args.max_seq_len, &vb.device().clone())?;
         Ok(Attention {
             wq,
             wk,
             wv,
             wo,
-            mask,
             n_heads,
             n_kv_heads,
             n_rep,
             head_dim,
         })
     }
-    pub fn forward(&self, x: &Tensor, freqs_cos: &Tensor, freqs_sin: &Tensor) -> Result<Tensor> {
+    pub fn forward(
+        &self,
+        x: &Tensor,
+        freqs_cos: &Tensor,
+        freqs_sin: &Tensor,
+        block_idx: usize,
+        cache: &mut Cache,
+    ) -> Result<Tensor> {
         let (b_sz, seq_len, n_embd) = x.dims3()?;
         // QKV
         let xq = self.wq.forward(x)?;
@@ -154,25 +176,38 @@ impl Attention {
 
         let xq = xq.reshape((b_sz, seq_len, self.n_heads, self.head_dim))?;
         let xk = xk.reshape((b_sz, seq_len, self.n_kv_heads, self.head_dim))?;
-        let xv = xv.reshape((b_sz, seq_len, self.n_kv_heads, self.head_dim))?;
+        let mut xv = xv.reshape((b_sz, seq_len, self.n_kv_heads, self.head_dim))?;
 
         // RoPE relative positional embeddings
         let xq = apply_rotary_emb(&xq, freqs_cos, freqs_sin)?;
-        let xk = apply_rotary_emb(&xk, freqs_cos, freqs_sin)?;
+        let mut xk = apply_rotary_emb(&xk, freqs_cos, freqs_sin)?;
+
+        let mut cache = cache.lock().unwrap();
+        if let Some((cache_k, cache_v)) = &cache[block_idx] {
+            xk = Tensor::cat(&[cache_k, &xk], 1)?.contiguous()?;
+            xv = Tensor::cat(&[cache_v, &xv], 1)?.contiguous()?;
+        }
+        cache[block_idx] = Some((xk.clone(), xv.clone()));
 
         // grouped multiquery attention: expand out keys and values
-        let xk = repeat_kv(xk, self.n_rep)?; // (bs, seqlen, n_heads, head_dim)
+        let xk = repeat_kv(xk, self.n_rep)?; // (bs, seq_len+cache_len, n_heads, head_dim)
         let xv = repeat_kv(xv, self.n_rep)?;
 
         // make heads into a batch dimension
-        let xq = xq.transpose(1, 2)?.contiguous()?; // (bs, n_heads, seqlen, head_dim)
-        let xk = xk.transpose(1, 2)?.contiguous()?;
-        let xv = xv.transpose(1, 2)?.contiguous()?;
+        let xq = xq.transpose(1, 2)?.contiguous()?; // (bs, n_heads, seq_len, head_dim)
+        let xk = xk.transpose(1, 2)?.contiguous()?; // (bs, n_heads, seq_len+cache_len, head_dim)
+        let xv = xv.transpose(1, 2)?.contiguous()?; // (bs, n_heads, seq_len+cache_len, head_dim)
 
+        // (bs, n_heads, seq_len, seq_len+cache_len)
         let scores = (xq.matmul(&xk.t()?)? / (self.head_dim as f64).sqrt())?;
-        let scores = scores.broadcast_add(&self.mask.i((.., .., ..seq_len, ..seq_len))?)?;
+
+        // we don't need to use mask for inference, because
+        // 1. during prompt pass we have seq_len > 1, but we only care about last token, and it can attend everything before
+        // 2. during next steps, we iterate token by token and given some pos_idx and seq_len == 1, we will index into pos_idx
+        // row of the mask and take up to pos_idx + 1 columns from this row, effectively making the commented op identity op.
+        // let scores = scores.broadcast_add(&self.mask.i((.., .., ..seq_len, ..seq_len))?)?;
         let scores = softmax(&scores, D::Minus1)?;
-        // out will be (bs, n_heads, seqlen, head_dim)
+        // out will be (bs, n_heads, seq_len, head_dim)
         let out = scores.matmul(&xv.contiguous()?)?;
         // restore time as batch dimension and concat heads
         let out = out.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
@@ -210,17 +245,6 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     }
 }
 
-fn triu_mask(t: usize, device: &Device) -> Result<Tensor> {
-    let mut mask = vec![vec![f32::NEG_INFINITY; t]; t];
-    for (i, row) in mask.iter_mut().enumerate().take(t) {
-        for val in row.iter_mut().take(i + 1) {
-            *val = 0.0;
-        }
-    }
-    let mask = Tensor::from_iter(mask.into_iter().flatten(), device)?;
-    mask.reshape((1, 1, t, t))
-}
-
 #[cfg(test)]
 mod tests {
     use approx::*;
@@ -252,6 +276,7 @@ mod tests {
     }
 
     fn approx_eq_vec(a: &Vec<f32>, b: &Vec<f32>, eps: f32) -> bool {
+        println!("{a:?}\n{b:?}");
         if a.len() != b.len() {
             return false;
         }
@@ -291,14 +316,46 @@ mod tests {
         let ws =
             TransformerWeights::from_reader(&mut f, &args, dev).expect("read model weights failed");
         let vb = ws.var_builder(&args, dev)?;
-        let trns = Transformer::from(vb, &args)?;
+        let mut trns = Transformer::from(vb, &args)?;
         let x = TN_INP.iter().map(|&v| v as u32).collect();
         let x = Tensor::from_vec(x, (4, 8), dev)?;
-        let y = trns.forward(&x)?;
+        let y = trns.forward(&x, 7)?;
         assert_eq!(y.dims3()?, (4, 8, 32));
         let t_last = y.i((.., 7, ..))?;
         assert!(approx_eq_vec(
             &t_last.flatten_all()?.to_vec1()?,
+            &TN_OUT.to_vec(),
+            1e-3
+        ));
+        Ok(())
+    }
+    #[test]
+    fn test_transformer_forward_iter() -> Result<()> {
+        // setup
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_tiny.bin");
+        let dev = &Device::Cpu;
+        let mut f = File::open(path).expect("test_tiny.bin file is expected");
+        let args = ModelArgs::from_reader(&mut f).expect("read model args failed");
+        let ws =
+            TransformerWeights::from_reader(&mut f, &args, dev).expect("read model weights failed");
+        let vb = ws.var_builder(&args, dev)?;
+        let mut trns = Transformer::from(vb, &args)?;
+        // input
+        let (batch_sz, seq_len) = (4, 8);
+        let x: Vec<_> = TN_INP.iter().map(|&v| v as u32).collect();
+        let x = Tensor::from_vec(x, (batch_sz, seq_len), dev).expect("failed to build tensor");
+        let mut y: Tensor = Tensor::zeros((batch_sz, 1, args.dim), DType::F32, dev)?;
+        for i in 0..seq_len {
+            let input = x.i((.., i))?.unsqueeze(1)?;
+            println!("{:?}", input.shape());
+            y = trns.forward(&input, i)?;
+        }
+        assert!(approx_eq_vec(
+            &y.flatten_all()?.to_vec1()?,
             &TN_OUT.to_vec(),
             1e-3
         ));
@@ -373,11 +430,15 @@ mod tests {
             d,
         )?;
         let freqs_sin = freqs_sin.i((..seq_len, .., ..))?;
-        let result = block.forward(&inp, &freqs_cos, &freqs_sin)?;
+        let mut cache = Arc::new(Mutex::new(vec![None; args.n_layers]));
+        let result = block.forward(&inp, &freqs_cos, &freqs_sin, 0, &mut cache)?;
         assert_eq!(result.dims3()?, (2, seq_len, args.dim));
+        let last_step = result.i((.., seq_len - 1, ..))?;
+        let expect = Tensor::from_slice(TB_OUT, (2, seq_len, args.dim), d)?;
+        let expect = expect.i((.., seq_len - 1, ..))?;
         assert!(approx_eq_vec(
-            &result.flatten_all()?.to_vec1()?,
-            &TB_OUT.to_vec(),
+            &last_step.flatten_all()?.to_vec1()?,
+            &expect.flatten_all()?.to_vec1()?,
             1e-3
         ));
         Ok(())
@@ -479,12 +540,16 @@ mod tests {
             device,
         )?;
         let freqs_sin = freqs_sin.i((..seq_len, .., ..))?;
+        let mut cache = Arc::new(Mutex::new(vec![None; args.n_layers]));
         // check results
-        let result = att.forward(&inp, &freqs_cos, &freqs_sin)?;
+        let result = att.forward(&inp, &freqs_cos, &freqs_sin, 0, &mut cache)?;
         assert_eq!(result.dims3()?, (2, seq_len, args.dim));
+        let last_step = result.i((.., seq_len - 1, ..))?;
+        let expect = Tensor::from_slice(ATT_OUT_FLAT, (2, seq_len, args.dim), device)?;
+        let expect = expect.i((.., seq_len - 1, ..))?;
         assert!(approx_eq_vec(
-            &result.flatten_all()?.to_vec1()?,
-            &ATT_OUT_FLAT.to_vec(),
+            &last_step.flatten_all()?.to_vec1()?,
+            &expect.flatten_all()?.to_vec1()?,
             1e-3
         ));
         Ok(())
@@ -529,26 +594,6 @@ mod tests {
         assert_eq!(
             &repeated.flatten_all()?.to_vec1::<f32>()?,
             &REP_KV_OUT.to_vec()
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_triu_mask() -> Result<()> {
-        let mask = triu_mask(3, &Device::Cpu)?;
-        assert_eq!(mask.dims4()?, (1, 1, 3, 3));
-        assert_eq!(
-            mask.flatten_all()?.to_vec1::<f32>()?,
-            vec![
-                0.0,
-                f32::NEG_INFINITY,
-                f32::NEG_INFINITY,
-                0.0,
-                0.0,
-                f32::NEG_INFINITY,
-                0.0,
-                0.0,
-                0.0,
-            ],
         );
         Ok(())
     }

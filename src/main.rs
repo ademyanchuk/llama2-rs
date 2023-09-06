@@ -70,7 +70,7 @@ pub struct Args {
 
 fn generate(args: &GenerateCmd) -> Result<()> {
     // hardcode for now, TODO: CLI as in original repo
-    let path = "stories15M.bin";
+    let path = "stories110M.bin";
     let tok_path = "tokenizer.json";
     let prompt = args.input.clone();
     let mut max_new_tokens = args.num_steps; // number of tokens generated in each sample
@@ -83,7 +83,7 @@ fn generate(args: &GenerateCmd) -> Result<()> {
     let args = ModelArgs::from_reader(&mut f)?;
     let ws = TransformerWeights::from_reader(&mut f, &args, device)?;
     let vb = ws.var_builder(&args, device)?;
-    let transformer = Transformer::from(vb, &args)?;
+    let mut transformer = Transformer::from(vb, &args)?;
 
     // update max_new_tokens to be in range
     if max_new_tokens == 0 || max_new_tokens > args.max_seq_len {
@@ -114,11 +114,11 @@ fn generate(args: &GenerateCmd) -> Result<()> {
         if step >= max_new_tokens {
             break;
         }
-        // make sure we have context length >= model's max sequence length
-        let start_i = tokens.len().saturating_sub(args.max_seq_len);
+        let context_size = if step > 0 { 1 } else { tokens.len() };
+        let start_i = tokens.len().saturating_sub(context_size);
         let context = &tokens[start_i..];
         let input = Tensor::new(context, device)?.unsqueeze(0)?;
-        let logits = transformer.forward(&input)?;
+        let logits = transformer.forward(&input, step)?;
         // only last time step
         let logits = logits.i((0, logits.dim(1)? - 1))?;
         // sample, decode, print
@@ -127,6 +127,9 @@ fn generate(args: &GenerateCmd) -> Result<()> {
         if next_token_id == 1 {
             break;
         }
+        // this way we peak next_token as input for the next iteration
+        step += context.len();
+
         tokens.push(next_token_id);
         // From candle examples (using it here, to make output "interactive")
         // Extracting the last token as a string is complicated, here we just apply some simple
@@ -138,7 +141,6 @@ fn generate(args: &GenerateCmd) -> Result<()> {
             print!("{text}");
             std::io::stdout().flush()?;
         }
-        step += 1;
     }
     let dt = start.elapsed();
     if step > 1 {

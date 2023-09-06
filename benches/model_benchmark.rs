@@ -94,7 +94,7 @@ pub fn benchmark_candle_model(c: &mut Criterion) {
         let ws = cnd_weights::TransformerWeights::from_reader(&mut f, &args, dev)
             .expect("read model weights failed");
         let vb = ws.var_builder(&args, dev).expect("var builder failed");
-        let trns = cnd_model::Transformer::from(vb, &args).expect("model load failed");
+        let mut trns = cnd_model::Transformer::from(vb, &args).expect("model load failed");
         let shape = (1, 256);
         let hi = args.vocab_size as u32;
         let seed = [42; 32];
@@ -103,7 +103,7 @@ pub fn benchmark_candle_model(c: &mut Criterion) {
         b.iter(|| {
             let x: Vec<_> = (0..256).map(|_| rng.gen_range(0..hi)).collect();
             let x = Tensor::from_vec(x, shape, dev).expect("x failed");
-            trns.forward(black_box(&x))
+            trns.forward(black_box(&x), 0)
         })
     });
 }
