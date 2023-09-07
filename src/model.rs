@@ -23,6 +23,7 @@ pub struct ModelArgs {
     pub hidden_dim: usize,
     pub norm_eps: f32,
     pub max_seq_len: usize,
+    pub shared_classifier: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -36,6 +37,7 @@ impl ModelArgs {
         hidden_dim: usize,
         norm_eps: f32,
         max_seq_len: usize,
+        shared_classifier: bool,
     ) -> ModelArgs {
         ModelArgs {
             dim,
@@ -46,6 +48,7 @@ impl ModelArgs {
             hidden_dim,
             norm_eps,
             max_seq_len,
+            shared_classifier,
         }
     }
 }
@@ -62,6 +65,7 @@ impl Default for ModelArgs {
             hidden_dim: 256,
             norm_eps: 1e-5,
             max_seq_len: 2048,
+            shared_classifier: true,
         }
     }
 }
@@ -74,6 +78,7 @@ pub struct ModelArgsBuilder {
     hidden_dim: Option<usize>,
     norm_eps: Option<f32>,
     max_seq_len: Option<usize>,
+    shared_classifier: Option<bool>,
 }
 #[allow(clippy::new_without_default)]
 impl ModelArgsBuilder {
@@ -87,6 +92,7 @@ impl ModelArgsBuilder {
             hidden_dim: None,
             norm_eps: None,
             max_seq_len: None,
+            shared_classifier: None,
         }
     }
 
@@ -130,6 +136,11 @@ impl ModelArgsBuilder {
         self
     }
 
+    pub fn shared_classifier(mut self, shared_classifier: bool) -> Self {
+        self.shared_classifier = Some(shared_classifier);
+        self
+    }
+
     pub fn build(self) -> ModelArgs {
         ModelArgs {
             dim: self.dim.unwrap_or(4096),
@@ -140,6 +151,7 @@ impl ModelArgsBuilder {
             hidden_dim: self.hidden_dim.unwrap_or(256),
             norm_eps: self.norm_eps.unwrap_or(1e-5),
             max_seq_len: self.max_seq_len.unwrap_or(2048),
+            shared_classifier: self.shared_classifier.unwrap_or(true),
         }
     }
 }
@@ -1442,7 +1454,7 @@ mod tests {
     }
     #[test]
     fn test_attention() {
-        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32);
+        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32, true);
         let mut weights_data = HashMap::new();
         weights_data.insert("wq", ATT_WQ.to_vec());
         weights_data.insert("wk", ATT_WK.to_vec());

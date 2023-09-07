@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn test_attention() -> Result<()> {
         let device = &Device::Cpu;
-        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32);
+        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32, true);
         // need it here to build appropriate tensors for Linear layers
         let n_heads = args.n_heads;
         let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);

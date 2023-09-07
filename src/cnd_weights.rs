@@ -29,14 +29,31 @@ fn read_tensor<R: std::io::Read, S: Into<Shape>>(
 // ModelArgs from reader
 impl ModelArgs {
     pub fn from_reader<R: std::io::Read>(r: &mut R) -> Result<ModelArgs> {
+        // for the legacy export of models, we need to check a sign of vocab size
+        // see here https://github.com/karpathy/llama2.c/blob/master/export.py
+        let mut shared_classifier = true;
+        let dim = read_i32(r)? as usize;
+        let hidden_dim = read_i32(r)? as usize;
+        let n_layers = read_i32(r)? as usize;
+        let n_heads = read_i32(r)? as usize;
+        let n_kv_heads = read_i32(r)? as usize;
+        let mut vocab_size = read_i32(r)?;
+        if vocab_size < 0 {
+            shared_classifier = false;
+            vocab_size = -vocab_size;
+        }
+        let vocab_size = vocab_size as usize;
+        let max_seq_len = read_i32(r)? as usize;
+        // Build args
         Ok(ModelArgsBuilder::new()
-            .dim(read_i32(r)? as usize)
-            .hidden_dim(read_i32(r)? as usize)
-            .n_layers(read_i32(r)? as usize)
-            .n_heads(read_i32(r)? as usize)
-            .n_kv_heads(read_i32(r)? as usize)
-            .vocab_size(read_i32(r)? as usize)
-            .max_seq_len(read_i32(r)? as usize)
+            .dim(dim)
+            .hidden_dim(hidden_dim)
+            .n_layers(n_layers)
+            .n_heads(n_heads)
+            .n_kv_heads(n_kv_heads)
+            .vocab_size(vocab_size)
+            .max_seq_len(max_seq_len)
+            .shared_classifier(shared_classifier)
             .build())
     }
 }
@@ -60,6 +77,7 @@ pub struct TransformerWeights {
     w3: Tensor, // (layer, hidden_dim, dim)
     // final rmsnorm
     final_norm: Tensor, // (dim,)
+    lm_head: Tensor,    // (vocab_size, dim)
     // freq_cis for RoPE relatively positional embeddings
     freqs_cos: Tensor, // (seq_len, head_size/2)
     freqs_sin: Tensor, // (seq_len, head_size/2)
@@ -89,6 +107,11 @@ impl TransformerWeights {
         let final_norm = read_tensor(r, c.dim, dev)?;
         let freqs_cos = read_tensor(r, (c.max_seq_len, head_dim / 2), dev)?;
         let freqs_sin = read_tensor(r, (c.max_seq_len, head_dim / 2), dev)?;
+        let lm_head: Tensor = if !c.shared_classifier {
+            read_tensor(r, (c.vocab_size, c.dim), dev)?
+        } else {
+            embed.clone()
+        };
         Ok(TransformerWeights {
             embed,
             attn_norm,
@@ -101,6 +124,7 @@ impl TransformerWeights {
             w2,
             w3,
             final_norm,
+            lm_head,
             freqs_cos,
             freqs_sin,
         })
@@ -125,7 +149,7 @@ impl TransformerWeights {
         insert("freqs_cos", self.freqs_cos.clone());
         insert("freqs_sin", self.freqs_sin.clone());
         insert("embed.weight", self.embed.clone());
-        insert("lm_head.weight", tr(self.embed.clone())?);
+        insert("lm_head.weight", tr(self.lm_head.clone())?);
         insert("final_norm.weight", self.final_norm.clone());
         for layer in 0..cfg.n_layers {
             ws.insert(
