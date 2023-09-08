@@ -216,7 +216,7 @@ impl Attention {
 }
 
 // Functions
-fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+pub(crate) fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     // candle implementation requires cos and sin to have 3 dims, last one is 1
     let (b_sz, seq_len, h, n_embd) = x.dims4()?;
     let cos = cos.unsqueeze(1)?;
@@ -232,7 +232,7 @@ fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     Ok(rope)
 }
 
-fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
+pub(crate) fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     if n_rep == 1 {
         Ok(x)
     } else {
