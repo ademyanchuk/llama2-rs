@@ -1,19 +1,66 @@
-use std::collections::HashMap;
-
-/// Quantized version of the model architecture
-/// it supposed to be loaded from the version 2 of Karapathy's export
-/// version2_export here https://github.com/karpathy/llama2.c/blob/master/export.py
 use candle_core::quantized::{QMatMul, QTensor};
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
 use candle_nn::{
     embedding, linear_no_bias as linear, rms_norm, Embedding, Module, RmsNorm, VarBuilder,
 };
+use std::collections::HashMap;
+use std::io::{self, SeekFrom};
 
+use crate::cnd_weights::read_i32;
+use crate::model::ModelArgsBuilder;
 use crate::{
     cnd_model::{apply_rotary_emb, repeat_kv},
     model::ModelArgs,
 };
+
+/// Quantized version of the model architecture
+/// it supposed to be loaded from the version 2 of Karapathy's export
+/// version2_export here https://github.com/karpathy/llama2.c/blob/master/export.py
+
+// Model args from reader, V2 (quantized export in llama2.c repo)
+impl ModelArgs {
+    pub fn from_reader_v2<R: io::Read + io::Seek>(r: &mut R) -> anyhow::Result<ModelArgs> {
+        // 1. Check magic: should be uint32 of "ak42" in ASCII
+        let mut buf = [0u8; 4];
+        r.read_exact(&mut buf)?;
+        let magic = u32::from_le_bytes(buf);
+        if magic != 0x616b3432 {
+            anyhow::bail!("magic doesn't match!");
+        }
+        // 2. read version, must be version 2
+        let version = read_i32(r)?;
+        if version != 2 {
+            anyhow::bail!("export file version must be 2");
+        }
+        // 3. read model arguments
+        let dim = read_i32(r)? as usize;
+        let hidden_dim = read_i32(r)? as usize;
+        let n_layers = read_i32(r)? as usize;
+        let n_heads = read_i32(r)? as usize;
+        let n_kv_heads = read_i32(r)? as usize;
+        let vocab_size = read_i32(r)? as usize;
+        let max_seq_len = read_i32(r)? as usize;
+        // 4. read shared classifier 'B' - 1 byte
+        let mut buf = [0u8; 1];
+        r.read_exact(&mut buf)?;
+        let shared_classifier = buf[0] != 0;
+        // 4. we know the size of header is 256 bytes (spec of llama2.c v2 export)
+        // need to move reader ahead to read weights later
+        r.seek(SeekFrom::Start(256))?;
+        // Build args
+        Ok(ModelArgsBuilder::new()
+            .dim(dim)
+            .hidden_dim(hidden_dim)
+            .n_layers(n_layers)
+            .n_heads(n_heads)
+            .n_kv_heads(n_kv_heads)
+            .vocab_size(vocab_size)
+            .max_seq_len(max_seq_len)
+            .shared_classifier(shared_classifier)
+            .build())
+    }
+}
 
 // TODO: Implement reading from v2 version of Karpathy's export
 // this will allow to use dummy model for tests
@@ -129,33 +176,33 @@ impl Attention {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs::File, io::Seek};
+
     use super::*;
     use crate::test_data::*;
     use candle_core::{quantized::k_quants::BlockQ8_0, Device};
 
     #[test]
-    fn test_attention() -> Result<()> {
-        let device = &Device::Cpu;
-        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32, true);
-        // need it here to build appropriate tensors for Linear layers
-        let n_heads = args.n_heads;
-        let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
-        let head_dim = args.dim / n_heads;
-        let wq = Tensor::from_vec(ATT_WQ.to_vec(), (n_heads * head_dim, args.dim), device)?;
-        let wq = QTensor::quantize::<BlockQ8_0>(&wq)?;
-        let wk = Tensor::from_vec(ATT_WK.to_vec(), (n_kv_heads * head_dim, args.dim), device)?;
-        let wk = QTensor::quantize::<BlockQ8_0>(&wk)?;
-        let wv = Tensor::from_vec(ATT_WV.to_vec(), (n_kv_heads * head_dim, args.dim), device)?;
-        let wv = QTensor::quantize::<BlockQ8_0>(&wv)?;
-        let wo = Tensor::from_vec(ATT_WO.to_vec(), (args.dim, n_heads * head_dim), device)?;
-        let wo = QTensor::quantize::<BlockQ8_0>(&wo)?;
-        let mut q8_weights = HashMap::new();
-        q8_weights.insert("layers.0.wq".to_string(), wq);
-        q8_weights.insert("layers.0.wk".to_string(), wk);
-        q8_weights.insert("layers.0.wv".to_string(), wv);
-        q8_weights.insert("layers.0.wo".to_string(), wo);
-        let mut weights = TransformerWeights {q8_weights, f32_weights: HashMap::new()};
-        let att = Attention::from(&mut weights, &args, 0)?;
+    fn test_v2_args_reader() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v2(&mut file).expect("failed to read header");
+        // args = ModelArgs(dim=64, n_layers=2, n_heads=2, vocab_size=128, multiple_of=16, max_seq_len=32)
+        // shared classifier == true, hidden_dim == 176
+        assert_eq!(args.dim, 64);
+        assert_eq!(args.n_layers, 2);
+        assert_eq!(args.n_heads, 2);
+        assert_eq!(args.n_kv_heads, Some(2));
+        assert_eq!(args.vocab_size, 128);
+        assert_eq!(args.hidden_dim, 176);
+        assert_eq!(args.max_seq_len, 32);
+        assert!(args.shared_classifier);
+        let current_position = file.seek(SeekFrom::Current(0))?;
+        assert_eq!(current_position, 256);
         Ok(())
     }
 }
