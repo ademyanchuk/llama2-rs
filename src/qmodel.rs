@@ -15,12 +15,13 @@ use crate::{
 };
 
 /// Quantized version of the model architecture
-/// it supposed to be loaded from the version 2 of Karapathy's export
-/// version2_export here https://github.com/karpathy/llama2.c/blob/master/export.py
+/// it supposed to be loaded from the version 1 of Karapathy's export
+/// and convert to QTensor appropriate weights
+/// version1_export here https://github.com/karpathy/llama2.c/blob/master/export.py
 
-// Model args from reader, V2 (quantized export in llama2.c repo)
+// Model args from reader, V1 (llama2.c repo)
 impl ModelArgs {
-    pub fn from_reader_v2<R: io::Read + io::Seek>(r: &mut R) -> anyhow::Result<ModelArgs> {
+    pub fn from_reader_v1<R: io::Read + io::Seek>(r: &mut R) -> anyhow::Result<ModelArgs> {
         // 1. Check magic: should be uint32 of "ak42" in ASCII
         let mut buf = [0u8; 4];
         r.read_exact(&mut buf)?;
@@ -28,10 +29,10 @@ impl ModelArgs {
         if magic != 0x616b3432 {
             anyhow::bail!("magic doesn't match!");
         }
-        // 2. read version, must be version 2
+        // 2. read version, must be version 1
         let version = read_i32(r)?;
-        if version != 2 {
-            anyhow::bail!("export file version must be 2");
+        if version != 1 {
+            anyhow::bail!("export file version must be 1");
         }
         // 3. read model arguments
         let dim = read_i32(r)? as usize;
@@ -219,7 +220,7 @@ mod tests {
             .join("data")
             .join("test_qmodel.bin");
         let mut file = File::open(path)?;
-        let args = ModelArgs::from_reader_v2(&mut file).expect("failed to read header");
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
         // args = ModelArgs(dim=64, n_layers=2, n_heads=2, vocab_size=128, multiple_of=16, max_seq_len=32)
         // shared classifier == true, hidden_dim == 176
         assert_eq!(args.dim, 64);
