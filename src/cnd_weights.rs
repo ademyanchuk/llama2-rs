@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::model::{ModelArgs, ModelArgsBuilder};
 
-fn read_i32<R: std::io::Read>(r: &mut R) -> Result<i32> {
+pub(crate) fn read_i32<R: std::io::Read>(r: &mut R) -> Result<i32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
     Ok(i32::from_le_bytes(buf))
