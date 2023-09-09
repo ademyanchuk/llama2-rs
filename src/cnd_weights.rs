@@ -14,7 +14,7 @@ pub(crate) fn read_i32<R: std::io::Read>(r: &mut R) -> Result<i32> {
     Ok(i32::from_le_bytes(buf))
 }
 
-fn read_tensor<R: std::io::Read, S: Into<Shape>>(
+pub(crate) fn read_tensor<R: std::io::Read, S: Into<Shape>>(
     r: &mut R,
     shape: S,
     dev: &Device,
