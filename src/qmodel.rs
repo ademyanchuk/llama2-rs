@@ -1,5 +1,5 @@
 use candle_core::quantized::{QMatMul, QTensor};
-use candle_core::{DType, IndexOp, Result, Tensor, D};
+use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
 use candle_nn::{
     embedding, linear_no_bias as linear, rms_norm, Embedding, Module, RmsNorm, VarBuilder,
@@ -7,7 +7,7 @@ use candle_nn::{
 use std::collections::HashMap;
 use std::io::{self, SeekFrom};
 
-use crate::cnd_weights::read_i32;
+use crate::cnd_weights::{read_i32, read_tensor};
 use crate::model::ModelArgsBuilder;
 use crate::{
     cnd_model::{apply_rotary_emb, repeat_kv},
@@ -69,6 +69,35 @@ pub struct TransformerWeights {
     f32_weights: HashMap<String, Tensor>,
 }
 impl TransformerWeights {
+    pub fn from_reader<R: io::Read>(
+        r: &mut R,
+        args: &ModelArgs,
+        device: &Device,
+    ) -> anyhow::Result<TransformerWeights> {
+        // initialize hashmaps
+        let mut q8_weights: HashMap<String, QTensor> = HashMap::new();
+        let mut f32_weights: HashMap<String, Tensor> = HashMap::new();
+        // As of 2023-08-04, gemm is slower than expected when multiplying a matrix of
+        // size (1, k) with the transpose of a matrix of size (k, n) as it ends up transposing the
+        // second matrix back. We detect this case here and as a temporary hack make the weight
+        // matrix column major rather than row major. This ends up speeding up text generation from
+        // 120 token/s to 220 token/s on a Ryzen 2600X.
+        let tr = device.is_cpu() && !candle_core::utils::has_mkl();
+        let tr = |x: Tensor| if tr { x.t()?.contiguous()?.t() } else { Ok(x) };
+        // all f32 weights were written first (norm layers attn, ffd, final norm)
+        let attn_norm = read_tensor(r, (args.n_layers, args.dim), device)?;
+        let ffd_norm = read_tensor(r, (args.n_layers, args.dim), device)?;
+        for layer in 0..args.n_layers {
+            f32_weights.insert(format!("layers.{layer}.attn_norm"), attn_norm.i(layer)?);
+            f32_weights.insert(format!("layers.{layer}.ffd_norm"), ffd_norm.i(layer)?);
+        }
+        let final_norm = read_tensor(r, args.dim, device)?;
+        f32_weights.insert("final_norm".to_string(), final_norm);
+        QTensor::new(vec![0f32; 8], (2, 4));
+
+
+        todo!()
+    }
     pub fn remove_q8(&mut self, name: &str) -> Result<QTensor> {
         match self.q8_weights.remove(name) {
             None => candle_core::bail!("cannot find tensor with name '{name}'"),
