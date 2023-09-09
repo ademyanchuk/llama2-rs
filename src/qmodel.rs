@@ -1,3 +1,4 @@
+use candle_core::quantized::k_quants::BlockQ8_0;
 use candle_core::quantized::{QMatMul, QTensor};
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
@@ -63,7 +64,7 @@ impl ModelArgs {
     }
 }
 
-// TODO: Implement reading from v2 version of Karpathy's export
+// TODO: Implement reading from v1 version of Karpathy's export
 // this will allow to use dummy model for tests
 pub struct TransformerWeights {
     q8_weights: HashMap<String, QTensor>,
@@ -78,13 +79,6 @@ impl TransformerWeights {
         // initialize hashmaps
         let mut q8_weights: HashMap<String, QTensor> = HashMap::new();
         let mut f32_weights: HashMap<String, Tensor> = HashMap::new();
-        // As of 2023-08-04, gemm is slower than expected when multiplying a matrix of
-        // size (1, k) with the transpose of a matrix of size (k, n) as it ends up transposing the
-        // second matrix back. We detect this case here and as a temporary hack make the weight
-        // matrix column major rather than row major. This ends up speeding up text generation from
-        // 120 token/s to 220 token/s on a Ryzen 2600X.
-        let tr = device.is_cpu() && !candle_core::utils::has_mkl();
-        let tr = |x: Tensor| if tr { x.t()?.contiguous()?.t() } else { Ok(x) };
         // all f32 weights were written first (norm layers attn, ffd, final norm)
         let attn_norm = read_tensor(r, (args.n_layers, args.dim), device)?;
         let ffd_norm = read_tensor(r, (args.n_layers, args.dim), device)?;
@@ -94,10 +88,83 @@ impl TransformerWeights {
         }
         let final_norm = read_tensor(r, args.dim, device)?;
         f32_weights.insert("final_norm".to_string(), final_norm);
-        QTensor::new(vec![0f32; 8], (2, 4));
+        // next embeddings
+        let embed = read_tensor(r, (args.vocab_size, args.dim), device)?;
 
+        // linear layers which supposed to be quantized
+        // careful with wk and wv, in case n_kv_heads != n_heads we need right shape
+        let n_heads = args.n_heads;
+        let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
+        let head_dim = args.dim / n_heads; // note: dim = head_dim * n_heads
+                                           // read in the rest of blocks' weights
+                                           // attention weights first
+        let wq = read_tensor(r, (args.n_layers, args.dim, args.dim), device)?; // assume? out_dim, in_dim as in linear layers for now
+        for layer in 0..args.n_layers {
+            q8_weights.insert(
+                format!("layers.{layer}.wq"),
+                QTensor::quantize::<BlockQ8_0>(&wq.i(layer)?)?,
+            );
+        }
+        let wk = read_tensor(r, (args.n_layers, n_kv_heads * head_dim, args.dim), device)?;
+        for layer in 0..args.n_layers {
+            q8_weights.insert(
+                format!("layers.{layer}.wk"),
+                QTensor::quantize::<BlockQ8_0>(&wk.i(layer)?)?,
+            );
+        }
+        let wv = read_tensor(r, (args.n_layers, n_kv_heads * head_dim, args.dim), device)?;
+        for layer in 0..args.n_layers {
+            q8_weights.insert(
+                format!("layers.{layer}.wv"),
+                QTensor::quantize::<BlockQ8_0>(&wv.i(layer)?)?,
+            );
+        }
+        let wo = read_tensor(r, (args.n_layers, args.dim, args.dim), device)?;
+        for layer in 0..args.n_layers {
+            q8_weights.insert(
+                format!("layers.{layer}.wo"),
+                QTensor::quantize::<BlockQ8_0>(&wo.i(layer)?)?,
+            );
+        }
+        // feed forward weights
+        let w1 = read_tensor(r, (args.n_layers, args.hidden_dim, args.dim), device)?;
+        for layer in 0..args.n_layers {
+            q8_weights.insert(
+                format!("layers.{layer}.w1"),
+                QTensor::quantize::<BlockQ8_0>(&w1.i(layer)?)?,
+            );
+        }
+        let w2 = read_tensor(r, (args.n_layers, args.dim, args.hidden_dim), device)?;
+        for layer in 0..args.n_layers {
+            q8_weights.insert(
+                format!("layers.{layer}.w2"),
+                QTensor::quantize::<BlockQ8_0>(&w2.i(layer)?)?,
+            );
+        }
+        let w3 = read_tensor(r, (args.n_layers, args.hidden_dim, args.dim), device)?;
+        for layer in 0..args.n_layers {
+            q8_weights.insert(
+                format!("layers.{layer}.w3"),
+                QTensor::quantize::<BlockQ8_0>(&w3.i(layer)?)?,
+            );
+        }
+        // check if not shared classifier and read head of not
+        let lm_head: Tensor = if !args.shared_classifier {
+            read_tensor(r, (args.vocab_size, args.dim), device)?
+        } else {
+            embed.clone()
+        };
+        // postpone inserting in case we need this tensor
+        f32_weights.insert("embed".to_string(), embed);
+        q8_weights.insert(
+            "lm_head".to_string(),
+            QTensor::quantize::<BlockQ8_0>(&lm_head)?,
+        );
 
-        todo!()
+        anyhow::Ok(TransformerWeights {
+            q8_weights,
+            f32_weights,
+        })
     }
     pub fn remove_q8(&mut self, name: &str) -> Result<QTensor> {
         match self.q8_weights.remove(name) {
@@ -156,7 +223,7 @@ impl Attention {
         freqs_cos: &Tensor,
         freqs_sin: &Tensor,
         block_idx: usize,
-        cache: &mut Vec<Option<(Tensor, Tensor)>>,
+        cache: &mut [Option<(Tensor, Tensor)>],
     ) -> Result<Tensor> {
         let (b_sz, seq_len, n_embd) = x.dims3()?;
         // QKV
@@ -209,11 +276,10 @@ mod tests {
     use std::{env, fs::File, io::Seek};
 
     use super::*;
-    use crate::test_data::*;
-    use candle_core::{quantized::k_quants::BlockQ8_0, Device};
+    use candle_core::Device;
 
     #[test]
-    fn test_v2_args_reader() -> anyhow::Result<()> {
+    fn test_v1_args_reader() -> anyhow::Result<()> {
         let path = env::current_dir()
             .unwrap()
             .join("tests")
@@ -221,18 +287,31 @@ mod tests {
             .join("test_qmodel.bin");
         let mut file = File::open(path)?;
         let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
-        // args = ModelArgs(dim=64, n_layers=2, n_heads=2, vocab_size=128, multiple_of=16, max_seq_len=32)
-        // shared classifier == true, hidden_dim == 176
+        // args = ModelArgs(dim=64, n_layers=2, n_heads=2, vocab_size=128, multiple_of=64, max_seq_len=32)
+        // shared classifier == true, hidden_dim == 192
         assert_eq!(args.dim, 64);
         assert_eq!(args.n_layers, 2);
         assert_eq!(args.n_heads, 2);
         assert_eq!(args.n_kv_heads, Some(2));
         assert_eq!(args.vocab_size, 128);
-        assert_eq!(args.hidden_dim, 176);
+        assert_eq!(args.hidden_dim, 192);
         assert_eq!(args.max_seq_len, 32);
         assert!(args.shared_classifier);
         let current_position = file.seek(SeekFrom::Current(0))?;
         assert_eq!(current_position, 256);
+        Ok(())
+    }
+    #[test]
+    fn test_read_and_quantize_weights() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let _ = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        assert!(true);
         Ok(())
     }
 }
