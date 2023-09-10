@@ -294,7 +294,7 @@ fn precomput_freqs_cis(
 mod tests {
     use std::{env, fs::File, io::Seek};
 
-    use crate::test_data::{TB_FREQS_COS, TB_FREQS_SIN};
+    use crate::test_data::{QATT_INP, QATT_OUT, TB_FREQS_COS, TB_FREQS_SIN};
 
     use super::*;
     use approx::abs_diff_eq;
@@ -346,6 +346,43 @@ mod tests {
         let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
         let _ = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
         assert!(true);
+        Ok(())
+    }
+    #[test]
+    fn test_attention() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let seq_len = 4;
+        let device = &Device::Cpu;
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let attn = Attention::from(&mut weights, &args, 0)?;
+
+        let (freqs_cos, freqs_sin) =
+            precomput_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
+        let freqs_cos = freqs_cos.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_sin = freqs_sin.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_cos = freqs_cos.i((..seq_len, .., ..))?;
+        let freqs_sin = freqs_sin.i((..seq_len, .., ..))?;
+
+        let mut cache: Vec<Option<(Tensor, Tensor)>> = vec![None];
+        let input = Tensor::from_slice(QATT_INP, (2, seq_len, args.dim), device)?;
+
+        let output = attn.forward(&input, &freqs_cos, &freqs_sin, 0, &mut cache)?;
+        assert_eq!(output.dims3()?, (2, seq_len, args.dim));
+        let last_step = output.i((.., seq_len - 1, ..))?;
+        let expect = Tensor::from_slice(QATT_OUT, (2, seq_len, args.dim), device)?;
+        let expect = expect.i((.., seq_len - 1, ..))?;
+        assert!(approx_eq_vec(
+            &last_step.flatten_all()?.to_vec1()?,
+            &expect.flatten_all()?.to_vec1()?,
+            1e-1 // we compare the result from quantized model with reference from f32 model
+        ));
+
         Ok(())
     }
     #[test]
