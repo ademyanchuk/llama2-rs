@@ -270,14 +270,48 @@ impl Attention {
         self.wo.forward(&out)
     }
 }
+// Functions
+fn precomput_freqs_cis(
+    head_dim: usize,
+    max_seq_len: usize,
+    freq_base: f32,
+) -> Result<(Tensor, Tensor)> {
+    let theta: Vec<_> = (0..head_dim)
+        .step_by(2)
+        .map(|i| 1f32 / freq_base.powf(i as f32 / head_dim as f32))
+        .collect();
+    let theta = Tensor::new(theta.as_slice(), &Device::Cpu)?;
+    let idx_theta = Tensor::arange(0, max_seq_len as u32, &Device::Cpu)?
+        .to_dtype(DType::F32)?
+        .reshape((max_seq_len, 1))?
+        .matmul(&theta.reshape((1, theta.elem_count()))?)?;
+    let cos = idx_theta.cos()?;
+    let sin = idx_theta.sin()?;
+    Ok((cos, sin))
+}
 
 #[cfg(test)]
 mod tests {
     use std::{env, fs::File, io::Seek};
 
+    use crate::test_data::{TB_FREQS_COS, TB_FREQS_SIN};
+
     use super::*;
+    use approx::abs_diff_eq;
     use candle_core::Device;
 
+    fn approx_eq_vec(a: &Vec<f32>, b: &Vec<f32>, eps: f32) -> bool {
+        println!("{a:?}\n{b:?}");
+        if a.len() != b.len() {
+            return false;
+        }
+        for (val_a, val_b) in a.iter().zip(b.iter()) {
+            if !abs_diff_eq!(val_a, val_b, epsilon = eps) {
+                return false;
+            }
+        }
+        true
+    }
     #[test]
     fn test_v1_args_reader() -> anyhow::Result<()> {
         let path = env::current_dir()
@@ -312,6 +346,24 @@ mod tests {
         let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
         let _ = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
         assert!(true);
+        Ok(())
+    }
+    #[test]
+    fn test_precompute_frecs_cis() -> Result<()> {
+        let (dim, n_heads, max_seq_len) = (8, 2, 32);
+        let (freqs_cos, freqs_sin) = precomput_freqs_cis(dim / n_heads, max_seq_len, 10000.0)?;
+        assert_eq!(freqs_cos.dims(), &[max_seq_len, dim / n_heads / 2]);
+        assert_eq!(freqs_sin.dims(), &[max_seq_len, dim / n_heads / 2]);
+        assert!(approx_eq_vec(
+            &TB_FREQS_COS.to_vec(),
+            &freqs_cos.flatten_all()?.to_vec1::<f32>()?,
+            1e-3
+        ));
+        assert!(approx_eq_vec(
+            &TB_FREQS_SIN.to_vec(),
+            &freqs_sin.flatten_all()?.to_vec1::<f32>()?,
+            1e-3
+        ));
         Ok(())
     }
 }
