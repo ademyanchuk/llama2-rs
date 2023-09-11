@@ -3,7 +3,8 @@ use candle_core::quantized::{QMatMul, QTensor};
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
 use candle_nn::{
-    embedding, linear_no_bias as linear, rms_norm, Embedding, Module, RmsNorm, VarBuilder,
+    embedding, linear_no_bias as linear, rms_norm, Embedding, LayerNorm, Module, RmsNorm,
+    VarBuilder,
 };
 use std::collections::HashMap;
 use std::io::{self, SeekFrom};
@@ -180,6 +181,56 @@ impl TransformerWeights {
 }
 
 // Blocks
+pub struct TransformerBlock {
+    attention: Attention,
+    feed_forward: FeedForward,
+    attn_norm: LayerNorm,
+    ffd_norm: LayerNorm,
+}
+impl TransformerBlock {
+    pub fn from(
+        weights: &mut TransformerWeights,
+        args: &ModelArgs,
+        block_id: usize,
+    ) -> Result<TransformerBlock> {
+        let attention = Attention::from(weights, args, block_id)?;
+        let feed_forward = FeedForward::from(weights, block_id)?;
+        let attn_norm = LayerNorm::rms_norm(
+            weights.remove_f32(&format!("layers.{block_id}.attn_norm"))?,
+            args.norm_eps as f64,
+        );
+        let ffd_norm = LayerNorm::rms_norm(
+            weights.remove_f32(&format!("layers.{block_id}.ffd_norm"))?,
+            args.norm_eps as f64,
+        );
+        Ok(TransformerBlock {
+            attention,
+            feed_forward,
+            attn_norm,
+            ffd_norm,
+        })
+    }
+    pub fn forward(
+        &self,
+        x: &Tensor,
+        freqs_cos: &Tensor,
+        freqs_sin: &Tensor,
+        block_idx: usize,
+        cache: &mut [Option<(Tensor, Tensor)>],
+    ) -> Result<Tensor> {
+        let residual = x;
+        let x = (residual
+            + self.attention.forward(
+                &self.attn_norm.forward(x)?,
+                freqs_cos,
+                freqs_sin,
+                block_idx,
+                cache,
+            )?)?;
+        let residual = &x;
+        residual + self.feed_forward.forward(&self.ffd_norm.forward(&x)?)
+    }
+}
 pub struct Attention {
     wq: QMatMul,
     wk: QMatMul,
@@ -282,7 +333,6 @@ impl FeedForward {
     }
     pub fn from(
         weights: &mut TransformerWeights,
-        args: &ModelArgs,
         block_id: usize,
     ) -> Result<FeedForward> {
         let w1 = QMatMul::from_qtensor(weights.remove_q8(&format!("layers.{block_id}.w1"))?);
@@ -461,12 +511,30 @@ mod tests {
         let mut file = File::open(path)?;
         let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
         let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
-        let _ = FeedForward::from(&mut weights, &args, 0)?;
+        let _ = FeedForward::from(&mut weights, 0)?;
         assert!(true);
         Ok(())
     }
     #[test]
     fn test_feed_forward_forward() -> anyhow::Result<()> {
+        todo!()
+    }
+    #[test]
+    fn test_block_from() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let _ = TransformerBlock::from(&mut weights, &args, 0)?;
+        assert!(true);
+        Ok(())
+    }
+    #[test]
+    fn test_block_forward() -> anyhow::Result<()> {
         todo!()
     }
     #[test]
