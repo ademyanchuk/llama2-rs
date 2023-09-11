@@ -2,10 +2,7 @@ use candle_core::quantized::k_quants::BlockQ8_0;
 use candle_core::quantized::{QMatMul, QTensor};
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
-use candle_nn::{
-    embedding, linear_no_bias as linear, rms_norm, Embedding, LayerNorm, Module, RmsNorm,
-    VarBuilder,
-};
+use candle_nn::{Embedding, LayerNorm, Module};
 use std::collections::HashMap;
 use std::io::{self, SeekFrom};
 
@@ -180,6 +177,53 @@ impl TransformerWeights {
     }
 }
 
+// Model
+pub struct Transformer {
+    tok_embeddings: Embedding,
+    layers: Vec<TransformerBlock>,
+    norm: LayerNorm,
+    output: QMatMul,
+    freqs_cos: Tensor,
+    freqs_sin: Tensor,
+    cache: Vec<Option<(Tensor, Tensor)>>,
+}
+impl Transformer {
+    pub fn from(weights: &mut TransformerWeights, args: &ModelArgs) -> Result<Transformer> {
+        let tok_embeddings = Embedding::new(weights.remove_f32("embed")?, args.dim);
+        let output = QMatMul::from_qtensor(weights.remove_q8("lm_head")?);
+        let norm = LayerNorm::rms_norm(weights.remove_f32("final_norm")?, args.norm_eps as f64);
+        let layers: Vec<_> = (0..args.n_layers)
+            .map(|i| TransformerBlock::from(weights, args, i).unwrap())
+            .collect();
+        let (freqs_cos, freqs_sin) =
+            precompute_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
+        let freqs_cos = freqs_cos.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_sin = freqs_sin.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        Ok(Transformer {
+            tok_embeddings,
+            layers,
+            norm,
+            output,
+            freqs_cos,
+            freqs_sin,
+            cache: vec![None; args.n_layers],
+        })
+    }
+    pub fn forward(&mut self, x: &Tensor, pos_idx: usize) -> Result<Tensor> {
+        let (_, seq_len) = x.dims2()?;
+        let mut h = self.tok_embeddings.forward(x)?;
+        // index into correct position of freqs here
+        let freqs_cos = self.freqs_cos.i((pos_idx..pos_idx + seq_len, .., ..))?;
+        let freqs_sin = self.freqs_sin.i((pos_idx..pos_idx + seq_len, .., ..))?;
+        for (block_idx, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h, &freqs_cos, &freqs_sin, block_idx, &mut self.cache)?;
+        }
+        h = self.norm.forward(&h)?;
+        let logits = self.output.forward(&h)?;
+        logits.to_dtype(DType::F32)
+    }
+}
+
 // Blocks
 pub struct TransformerBlock {
     attention: Attention,
@@ -331,10 +375,7 @@ impl FeedForward {
     pub fn new(w1: QMatMul, w2: QMatMul, w3: QMatMul) -> FeedForward {
         FeedForward { w1, w2, w3 }
     }
-    pub fn from(
-        weights: &mut TransformerWeights,
-        block_id: usize,
-    ) -> Result<FeedForward> {
+    pub fn from(weights: &mut TransformerWeights, block_id: usize) -> Result<FeedForward> {
         let w1 = QMatMul::from_qtensor(weights.remove_q8(&format!("layers.{block_id}.w1"))?);
         let w2 = QMatMul::from_qtensor(weights.remove_q8(&format!("layers.{block_id}.w2"))?);
         let w3 = QMatMul::from_qtensor(weights.remove_q8(&format!("layers.{block_id}.w3"))?);
@@ -346,7 +387,7 @@ impl FeedForward {
     }
 }
 // Functions
-fn precomput_freqs_cis(
+fn precompute_freqs_cis(
     head_dim: usize,
     max_seq_len: usize,
     freq_base: f32,
@@ -438,7 +479,7 @@ mod tests {
         let attn = Attention::from(&mut weights, &args, 0)?;
 
         let (freqs_cos, freqs_sin) =
-            precomput_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
+            precompute_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
         let freqs_cos = freqs_cos.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
         let freqs_sin = freqs_sin.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
         let freqs_cos = freqs_cos.i((..seq_len, .., ..))?;
@@ -475,7 +516,7 @@ mod tests {
         let attn = Attention::from(&mut weights, &args, 0)?;
 
         let (freqs_cos, freqs_sin) =
-            precomput_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
+            precompute_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
         let freqs_cos = freqs_cos.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
         let freqs_sin = freqs_sin.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
         let freqs_cos = freqs_cos.i((..seq_len, .., ..))?;
@@ -538,9 +579,27 @@ mod tests {
         todo!()
     }
     #[test]
+    fn test_model_from() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let _ = Transformer::from(&mut weights, &args)?;
+        assert!(true);
+        Ok(())
+    }
+    #[test]
+    fn test_model_forward() -> anyhow::Result<()> {
+        todo!()
+    }
+    #[test]
     fn test_precompute_frecs_cis() -> Result<()> {
         let (dim, n_heads, max_seq_len) = (8, 2, 32);
-        let (freqs_cos, freqs_sin) = precomput_freqs_cis(dim / n_heads, max_seq_len, 10000.0)?;
+        let (freqs_cos, freqs_sin) = precompute_freqs_cis(dim / n_heads, max_seq_len, 10000.0)?;
         assert_eq!(freqs_cos.dims(), &[max_seq_len, dim / n_heads / 2]);
         assert_eq!(freqs_sin.dims(), &[max_seq_len, dim / n_heads / 2]);
         assert!(approx_eq_vec(
