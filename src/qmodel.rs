@@ -269,6 +269,32 @@ impl Attention {
         self.wo.forward(&out)
     }
 }
+
+pub struct FeedForward {
+    w1: QMatMul,
+    w2: QMatMul,
+    w3: QMatMul,
+}
+
+impl FeedForward {
+    pub fn new(w1: QMatMul, w2: QMatMul, w3: QMatMul) -> FeedForward {
+        FeedForward { w1, w2, w3 }
+    }
+    pub fn from(
+        weights: &mut TransformerWeights,
+        args: &ModelArgs,
+        block_id: usize,
+    ) -> Result<FeedForward> {
+        let w1 = QMatMul::from_qtensor(weights.remove_q8(&format!("layers.{block_id}.w1"))?);
+        let w2 = QMatMul::from_qtensor(weights.remove_q8(&format!("layers.{block_id}.w2"))?);
+        let w3 = QMatMul::from_qtensor(weights.remove_q8(&format!("layers.{block_id}.w3"))?);
+        Ok(Self::new(w1, w2, w3))
+    }
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = (silu(&self.w1.forward(x)?)? * self.w3.forward(x)?)?;
+        self.w2.forward(&x)
+    }
+}
 // Functions
 fn precomput_freqs_cis(
     head_dim: usize,
@@ -424,6 +450,24 @@ mod tests {
             ));
         }
         Ok(())
+    }
+    #[test]
+    fn test_feed_forward_from() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let _ = FeedForward::from(&mut weights, &args, 0)?;
+        assert!(true);
+        Ok(())
+    }
+    #[test]
+    fn test_feed_forward_forward() -> anyhow::Result<()> {
+        todo!()
     }
     #[test]
     fn test_precompute_frecs_cis() -> Result<()> {
