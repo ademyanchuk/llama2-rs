@@ -64,8 +64,7 @@ impl ModelArgs {
     }
 }
 
-// TODO: Implement reading from v1 version of Karpathy's export
-// this will allow to use dummy model for tests
+// Weights Struct and reading from v1 version of Karpathy's export
 pub struct TransformerWeights {
     q8_weights: HashMap<String, QTensor>,
     f32_weights: HashMap<String, Tensor>,
@@ -383,6 +382,47 @@ mod tests {
             1e-1 // we compare the result from quantized model with reference from f32 model
         ));
 
+        Ok(())
+    }
+    #[test]
+    fn test_attention_with_cache() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let seq_len = 4;
+        let device = &Device::Cpu;
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let attn = Attention::from(&mut weights, &args, 0)?;
+
+        let (freqs_cos, freqs_sin) =
+            precomput_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
+        let freqs_cos = freqs_cos.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_sin = freqs_sin.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_cos = freqs_cos.i((..seq_len, .., ..))?;
+        let freqs_sin = freqs_sin.i((..seq_len, .., ..))?;
+
+        let mut cache: Vec<Option<(Tensor, Tensor)>> = vec![None];
+        let input = Tensor::from_slice(QATT_INP, (2, seq_len, args.dim), device)?;
+        let expect = Tensor::from_slice(QATT_OUT, (2, seq_len, args.dim), device)?;
+        for step in 0..seq_len {
+            let out = attn.forward(
+                &input.i((.., step..step + 1, ..))?.contiguous()?,
+                &freqs_cos.i((step..step + 1, .., ..))?,
+                &freqs_sin.i((step..step + 1, .., ..))?,
+                0,
+                &mut cache,
+            )?;
+            let exp_step = expect.i((.., step..step + 1, ..))?;
+            assert!(approx_eq_vec(
+                &out.flatten_all()?.to_vec1()?,
+                &exp_step.flatten_all()?.to_vec1()?,
+                1e-1
+            ));
+        }
         Ok(())
     }
     #[test]
