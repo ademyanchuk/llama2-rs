@@ -1,5 +1,6 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Ok, Result};
@@ -7,11 +8,17 @@ use clap::{Parser, Subcommand};
 
 use candle_core::{Device, IndexOp, Tensor};
 
-use llama2_rs::cnd_model::Transformer;
+use llama2_rs::cnd_model::{self, Transformer};
 use llama2_rs::cnd_weights::TransformerWeights;
 use llama2_rs::model::ModelArgs;
+use llama2_rs::qmodel;
 use llama2_rs::sampler::LogitsSampler;
 use tokenizers::Tokenizer;
+
+enum TransformerModel {
+    F32Model(cnd_model::Transformer),
+    Q80Model(qmodel::Transformer),
+}
 
 fn temp_in_range(s: &str) -> Result<f64, String> {
     let temp: f64 = s
@@ -31,6 +38,14 @@ fn topp_in_range(s: &str) -> Result<f64, String> {
         Result::Ok(topp)
     } else {
         Err("top-p value not in range [0,1]".to_string())
+    }
+}
+fn validate_path(val: &str) -> Result<PathBuf, String> {
+    let path = Path::new(val);
+    if path.exists() {
+        Result::Ok(path.to_path_buf())
+    } else {
+        Err(format!("The path does not exist: {:?}", path))
     }
 }
 #[derive(Parser, Debug, Clone)]
@@ -63,14 +78,70 @@ enum Task {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
+    /// model.bin path, currently you need to provide v0 model for f32 weights,
+    /// and v1 model for quantized weights [we quantize them on load]
+    #[arg(value_parser = validate_path)]
+    path: PathBuf,
+    /// if you want to quantize model weights [model must be exported via v1 export]
+    #[arg(long, short, default_value = "false")]
+    quantize: bool,
     /// mode: generate|chat, default: generate
     #[command(subcommand)]
     mode: Option<Task>,
 }
 
-fn generate(args: &GenerateCmd) -> Result<()> {
+fn load_args<R: io::Read + io::Seek>(r: &mut R, quantize: bool) -> ModelArgs {
+    if quantize {
+        ModelArgs::from_reader_v1(r).expect("Make sure to provide v1 exported model!")
+    } else {
+        ModelArgs::from_reader(r).expect("Make sure to provide v0 exported model!")
+    }
+}
+fn load_model<R: io::Read>(
+    r: &mut R,
+    args: &ModelArgs,
+    quantize: bool,
+    device: &Device,
+) -> Result<TransformerModel> {
+    if quantize {
+        let mut weights = qmodel::TransformerWeights::from_reader(r, args, device)?;
+        Ok(TransformerModel::Q80Model(qmodel::Transformer::from(
+            &mut weights,
+            args,
+        )?))
+    } else {
+        let weights = TransformerWeights::from_reader(r, args, device)?;
+        let vb = weights.var_builder(args, device)?;
+        Ok(TransformerModel::F32Model(Transformer::from(vb, args)?))
+    }
+}
+fn print_token(next_token: u32, tokenizer: &Tokenizer) {
+    // Extracting the last token as a string is complicated, here we just apply some simple
+    // heuristics as it seems to work well enough for this example. See the following for more
+    // details:
+    // https://github.com/huggingface/tokenizers/issues/1141#issuecomment-1562644141
+    if let Some(text) = tokenizer.id_to_token(next_token) {
+        let text = text.replace('▁', " ").replace("<0x0A>", "\n");
+        let ascii = text
+            .strip_prefix("<0x")
+            .and_then(|t| t.strip_suffix('>'))
+            .and_then(|t| u8::from_str_radix(t, 16).ok());
+        match ascii {
+            None => print!("{text}"),
+            Some(ascii) => {
+                if let Some(chr) = char::from_u32(ascii as u32) {
+                    if chr.is_ascii() {
+                        print!("{chr}")
+                    }
+                }
+            }
+        }
+        let _ = io::stdout().flush();
+    }
+}
+
+fn generate<P: AsRef<Path>>(args: &GenerateCmd, model_path: P, quantize: bool) -> Result<()> {
     // hardcode for now, TODO: CLI as in original repo
-    let path = "stories110M.bin";
     let tok_path = "tokenizer.json";
     let prompt = args.input.clone();
     let mut max_new_tokens = args.num_steps; // number of tokens generated in each sample
@@ -79,15 +150,13 @@ fn generate(args: &GenerateCmd) -> Result<()> {
 
     // Load the model
     let device = &Device::Cpu;
-    let mut f = File::open(path)?;
-    let args = ModelArgs::from_reader(&mut f)?;
-    let ws = TransformerWeights::from_reader(&mut f, &args, device)?;
-    let vb = ws.var_builder(&args, device)?;
-    let mut transformer = Transformer::from(vb, &args)?;
+    let mut f = File::open(model_path)?;
+    let model_args = load_args(&mut f, quantize);
+    let mut model = load_model(&mut f, &model_args, quantize, device)?;
 
     // update max_new_tokens to be in range
-    if max_new_tokens == 0 || max_new_tokens > args.max_seq_len {
-        max_new_tokens = args.max_seq_len;
+    if max_new_tokens == 0 || max_new_tokens > model_args.max_seq_len {
+        max_new_tokens = model_args.max_seq_len;
     }
 
     // tokenizer and sampler
@@ -118,7 +187,10 @@ fn generate(args: &GenerateCmd) -> Result<()> {
         let start_i = tokens.len().saturating_sub(context_size);
         let context = &tokens[start_i..];
         let input = Tensor::new(context, device)?.unsqueeze(0)?;
-        let logits = transformer.forward(&input, step)?;
+        let logits = match &mut model {
+            TransformerModel::Q80Model(qmodel) => qmodel.forward(&input, step)?,
+            TransformerModel::F32Model(f32_model) => f32_model.forward(&input, step)?,
+        };
         // only last time step
         let logits = logits.i((0, logits.dim(1)? - 1))?;
         // sample, decode, print
@@ -132,15 +204,7 @@ fn generate(args: &GenerateCmd) -> Result<()> {
 
         tokens.push(next_token_id);
         // From candle examples (using it here, to make output "interactive")
-        // Extracting the last token as a string is complicated, here we just apply some simple
-        // heuristics as it seems to work well enough for this example. See the following for more
-        // details:
-        // https://github.com/huggingface/tokenizers/issues/1141#issuecomment-1562644141
-        if let Some(text) = enc.id_to_token(next_token_id) {
-            let text = text.replace('▁', " ").replace("<0x0A>", "\n");
-            print!("{text}");
-            std::io::stdout().flush()?;
-        }
+        print_token(next_token_id, &enc);
     }
     let dt = start.elapsed();
     if step > 1 {
@@ -156,12 +220,13 @@ fn generate(args: &GenerateCmd) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let path = args.path;
     match &args.mode {
         None => {
             let cmd = GenerateCmd::parse();
-            generate(&cmd)
+            generate(&cmd, path, args.quantize)
         }
-        Some(Task::Generate(cmd)) => generate(cmd),
+        Some(Task::Generate(cmd)) => generate(cmd, path, args.quantize),
         Some(Task::Chat(_)) => todo!(),
     }
 }
