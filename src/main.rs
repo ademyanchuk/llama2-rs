@@ -151,8 +151,11 @@ fn generate<P: AsRef<Path>>(args: &GenerateCmd, model_path: P, quantize: bool) -
     // Load the model
     let device = &Device::Cpu;
     let mut f = File::open(model_path)?;
+    let start = Instant::now();
     let model_args = load_args(&mut f, quantize);
     let mut model = load_model(&mut f, &model_args, quantize, device)?;
+    let dt = start.elapsed();
+    println!("Model loaded in: {} seconds", dt.as_secs_f64());
 
     // update max_new_tokens to be in range
     if max_new_tokens == 0 || max_new_tokens > model_args.max_seq_len {
