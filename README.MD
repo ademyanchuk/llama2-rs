@@ -6,6 +6,7 @@ The project is inspired by famous llama2.c by Andrej Karpathy. Make sure to go a
 - Text generation using the Llama2 model.
 - Command-line interface for setting various parameters like temperature, top-p, and number of tokens to generate.
 - Flexible subcommands for different tasks (`generate`, `chat`).
+- Quantize model weights on load (would require a machine with 32GB of RAM available to load and quantize weights of Llama-2-7b model, but generating process will be using only about 8GB).
 
 ## Dependencies:
 
@@ -64,4 +65,4 @@ Feel free to contribute to the repository by submitting pull requests or by repo
 MIT
 
 ## Acknowledgements:
-Special thanks to the developers of `candle` and `tokenizers` for their valuable libraries.
+Special thanks to the developers of `candle` and `tokenizers` for their immensely valuable libraries.
