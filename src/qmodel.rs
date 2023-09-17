@@ -410,7 +410,9 @@ fn precompute_freqs_cis(
 mod tests {
     use std::{env, fs::File, io::Seek};
 
-    use crate::test_data::{QATT_INP, QATT_OUT, TB_FREQS_COS, TB_FREQS_SIN};
+    use crate::test_data::{
+        QATT_INP, QATT_OUT, QBLOCK_OUT, QFFD_IN, QFFD_OUT, QMOD_OUT, TB_FREQS_COS, TB_FREQS_SIN,
+    };
 
     use super::*;
     use approx::abs_diff_eq;
@@ -558,7 +560,27 @@ mod tests {
     }
     #[test]
     fn test_feed_forward_forward() -> anyhow::Result<()> {
-        todo!()
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let ffd = FeedForward::from(&mut weights, 0)?;
+        let seq_len = 4;
+        let device = &Device::Cpu;
+        let x = Tensor::from_slice(QFFD_IN, (2, seq_len, args.dim), device)?;
+        let expect = Tensor::from_slice(QFFD_OUT, (2, seq_len, args.dim), device)?;
+        let y = ffd.forward(&x)?;
+        assert_eq!(y.dims3()?, (2, seq_len, args.dim));
+        assert!(approx_eq_vec(
+            &y.flatten_all()?.to_vec1()?,
+            &expect.flatten_all()?.to_vec1()?,
+            1e-1 // we compare the result from quantized model with reference from f32 model
+        ));
+        Ok(())
     }
     #[test]
     fn test_block_from() -> anyhow::Result<()> {
@@ -576,7 +598,40 @@ mod tests {
     }
     #[test]
     fn test_block_forward() -> anyhow::Result<()> {
-        todo!()
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let block = TransformerBlock::from(&mut weights, &args, 0)?;
+
+        let seq_len = 4;
+        let device = &Device::Cpu;
+        let (freqs_cos, freqs_sin) =
+            precompute_freqs_cis(args.dim / args.n_heads, args.max_seq_len, 10000.0)?;
+        let freqs_cos = freqs_cos.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_sin = freqs_sin.reshape((args.max_seq_len, args.dim / args.n_heads / 2, 1))?;
+        let freqs_cos = freqs_cos.i((..seq_len, .., ..))?;
+        let freqs_sin = freqs_sin.i((..seq_len, .., ..))?;
+
+        let mut cache: Vec<Option<(Tensor, Tensor)>> = vec![None];
+        let input = Tensor::from_slice(QATT_INP, (2, seq_len, args.dim), device)?;
+
+        let output = block.forward(&input, &freqs_cos, &freqs_sin, 0, &mut cache)?;
+        assert_eq!(output.dims3()?, (2, seq_len, args.dim));
+        let last_step = output.i((.., seq_len - 1, ..))?;
+        let expect = Tensor::from_slice(QBLOCK_OUT, (2, seq_len, args.dim), device)?;
+        let expect = expect.i((.., seq_len - 1, ..))?;
+        assert!(approx_eq_vec(
+            &last_step.flatten_all()?.to_vec1()?,
+            &expect.flatten_all()?.to_vec1()?,
+            1e-1 // we compare the result from quantized model with reference from f32 model
+        ));
+
+        Ok(())
     }
     #[test]
     fn test_model_from() -> anyhow::Result<()> {
@@ -594,7 +649,32 @@ mod tests {
     }
     #[test]
     fn test_model_forward() -> anyhow::Result<()> {
-        todo!()
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_qmodel.bin");
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        let mut weights = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
+        let mut model = Transformer::from(&mut weights, &args)?;
+        let seq_len = 4;
+        let device = &Device::Cpu;
+        let input =
+            Tensor::from_slice(&[13u32, 24, 54, 63, 77, 104, 42, 26], (2, seq_len), device)?;
+
+        let output = model.forward(&input, 0)?;
+        assert_eq!(output.dims3()?, (2, seq_len, args.vocab_size));
+        let last_step = output.i((.., seq_len - 1, ..))?;
+        let expect = Tensor::from_slice(QMOD_OUT, (2, 1, args.vocab_size), device)?;
+        assert!(approx_eq_vec(
+            &last_step.flatten_all()?.to_vec1()?,
+            &expect.flatten_all()?.to_vec1()?,
+            1e0 // we compare the result from quantized model with reference from f32 model
+                // given that qmodel produce reasonable output from generate function, implementation
+                // seems to be correct, TODO: maybe find reference quantized model?
+        ));
+        Ok(())
     }
     #[test]
     fn test_precompute_frecs_cis() -> Result<()> {
