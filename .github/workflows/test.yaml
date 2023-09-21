@@ -26,7 +26,10 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       - name: cargo test --locked
-        run: cargo test --locked --all-features --all-targets
+        run: |
+          cargo test --locked --all-features --tests
+          cargo test --locked --all-features --lib
+          cargo test --locked --all-features --examples
       - name: cargo test --doc
         run: cargo test --locked --all-features --doc
   os-check:
@@ -52,4 +55,7 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       - name: cargo test
-        run: cargo test --locked --all-features --all-targets
+        run: |
+          cargo test --locked --all-features --tests
+          cargo test --locked --all-features --lib
+          cargo test --locked --all-features --examples
