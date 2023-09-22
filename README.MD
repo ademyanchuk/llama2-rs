@@ -1,3 +1,5 @@
+[![test](https://github.com/ademyanchuk/llama2-rs/actions/workflows/test.yaml/badge.svg)](https://github.com/ademyanchuk/llama2-rs/actions/workflows/test.yaml)
+[![codecov](https://codecov.io/github/ademyanchuk/llama2-rs/graph/badge.svg?token=FAWFPD6BQF)](https://codecov.io/github/ademyanchuk/llama2-rs)
 # Llama2.c Text Generation in Rust
 
 The project is inspired by famous llama2.c by Andrej Karpathy. Make sure to go ahead, and read all or some parts of his repo amazing [readme](https://github.com/karpathy/llama2.c/tree/master). You will need to go [there](https://github.com/karpathy/llama2.c/tree/master#models) and download and/or export some model files to play with before using this rust port of his project. This rust implementation, I am working on, is purely for learning how modern transformers work and practicing programming in Rust at the same time. This repository contains a Rust implementation for text generation using the Llama2 type of model architecture. It provides capabilities for generating text based on prompts.
