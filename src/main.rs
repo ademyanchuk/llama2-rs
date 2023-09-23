@@ -62,6 +62,10 @@ struct GenerateCmd {
     #[arg(long, short, default_value_t = 256)]
     num_steps: usize,
 
+    /// random seed for reproducible randomness
+    #[arg(long, short, default_value_t = 13)]
+    seed: u64,
+
     /// input prompt
     #[arg(long, short, default_value = "")]
     input: String,
@@ -168,7 +172,7 @@ fn generate<P: AsRef<Path>>(args: &GenerateCmd, model_path: P, quantize: bool) -
     // or alternatively can use api as in candle llama-2 example
     let enc = Tokenizer::from_file(tok_path).expect("tokenizer loading failed");
     let mut sampler = LogitsSampler::new(
-        13,
+        args.seed,
         Some(temperature),
         if top_p > 0.0 { Some(top_p) } else { None }, // switch top-p off if value is 0.0
     );
