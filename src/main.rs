@@ -89,6 +89,22 @@ pub struct Args {
     /// if you want to quantize model weights [model must be exported via v1 export]
     #[arg(long, short, default_value = "false")]
     quantize: bool,
+
+    /// temperature in [0,inf], 1.0 = no change, < 1.0 = less random, > 1.0 = more random
+    #[arg(long, short, default_value_t = 1.0, value_parser = temp_in_range)]
+    temperature: f64,
+
+    /// p value in top-p (nucleus) sampling in [0,1]
+    #[arg(short, default_value_t = 0.9, value_parser = topp_in_range)]
+    p: f64,
+
+    /// number of steps to run for, default 256. 0 = max_seq_len
+    #[arg(long, short, default_value_t = 256)]
+    num_steps: usize,
+
+    /// random seed for reproducible randomness
+    #[arg(long, short, default_value_t = 13)]
+    seed: u64,
     /// mode: generate|chat, default: generate
     #[command(subcommand)]
     mode: Option<Task>,
@@ -105,8 +121,8 @@ fn load_model<R: io::Read>(
     r: &mut R,
     args: &ModelArgs,
     quantize: bool,
-    device: &Device,
 ) -> Result<TransformerModel> {
+    let device = &Device::Cpu;
     if quantize {
         let mut weights = qmodel::TransformerWeights::from_reader(r, args, device)?;
         Ok(TransformerModel::Q80Model(qmodel::Transformer::from(
@@ -144,20 +160,35 @@ fn print_token(next_token: u32, tokenizer: &Tokenizer) {
     }
 }
 
-fn generate<P: AsRef<Path>>(args: &GenerateCmd, model_path: P, quantize: bool) -> Result<()> {
-    // hardcode for now, TODO: CLI as in original repo
-    let tok_path = "tokenizer.json";
-    let prompt = args.input.clone();
+fn chat(args: &Args, chat_args: &ChatCmd) -> Result<()> {
+    // Load the model
+    let mut f = File::open(args.path.clone())?;
+    let start = Instant::now();
+    let model_args = load_args(&mut f, args.quantize);
+    let mut model = load_model(&mut f, &model_args, args.quantize)?;
+    let dt = start.elapsed();
+    println!("Model loaded in: {} seconds", dt.as_secs_f64());
+
+    // Load tokenizer and Sampler
+    let enc = Tokenizer::from_file("tokenizer.json").expect("tokenizer loading failed");
+    let mut sampler = LogitsSampler::new(
+        args.seed,
+        Some(args.temperature),
+        if args.p > 0.0 { Some(args.p) } else { None }, // switch top-p off if value is 0.0
+    );
+
+    Ok(())
+}
+
+fn generate(args: &Args, gen_args: &GenerateCmd) -> Result<()> {
+    let prompt = gen_args.input.clone();
     let mut max_new_tokens = args.num_steps; // number of tokens generated in each sample
-    let temperature = args.temperature; // 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-    let top_p = args.p; // nuclear sampling (sample from only top_p probabilities)
 
     // Load the model
-    let device = &Device::Cpu;
-    let mut f = File::open(model_path)?;
+    let mut f = File::open(args.path.clone())?;
     let start = Instant::now();
-    let model_args = load_args(&mut f, quantize);
-    let mut model = load_model(&mut f, &model_args, quantize, device)?;
+    let model_args = load_args(&mut f, args.quantize);
+    let mut model = load_model(&mut f, &model_args, args.quantize)?;
     let dt = start.elapsed();
     println!("Model loaded in: {} seconds", dt.as_secs_f64());
 
@@ -170,11 +201,11 @@ fn generate<P: AsRef<Path>>(args: &GenerateCmd, model_path: P, quantize: bool) -
     // To avoid rewriting the tokenizer myself, I utilize hugging face tokenizer library
     // We need tokenizer.json from https://huggingface.co/hf-internal-testing/llama-tokenizer/tree/main
     // or alternatively can use api as in candle llama-2 example
-    let enc = Tokenizer::from_file(tok_path).expect("tokenizer loading failed");
+    let enc = Tokenizer::from_file("tokenizer.json").expect("tokenizer loading failed");
     let mut sampler = LogitsSampler::new(
         args.seed,
-        Some(temperature),
-        if top_p > 0.0 { Some(top_p) } else { None }, // switch top-p off if value is 0.0
+        Some(args.temperature),
+        if args.p > 0.0 { Some(args.p) } else { None }, // switch top-p off if value is 0.0
     );
 
     print!("{}", prompt);
@@ -193,7 +224,7 @@ fn generate<P: AsRef<Path>>(args: &GenerateCmd, model_path: P, quantize: bool) -
         let context_size = if step > 0 { 1 } else { tokens.len() };
         let start_i = tokens.len().saturating_sub(context_size);
         let context = &tokens[start_i..];
-        let input = Tensor::new(context, device)?.unsqueeze(0)?;
+        let input = Tensor::new(context, &Device::Cpu)?.unsqueeze(0)?;
         let logits = match &mut model {
             TransformerModel::Q80Model(qmodel) => qmodel.forward(&input, step)?,
             TransformerModel::F32Model(f32_model) => f32_model.forward(&input, step)?,
@@ -227,13 +258,12 @@ fn generate<P: AsRef<Path>>(args: &GenerateCmd, model_path: P, quantize: bool) -
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let path = args.path;
     match &args.mode {
         None => {
             let cmd = GenerateCmd::parse();
-            generate(&cmd, path, args.quantize)
+            generate(&args, &cmd)
         }
-        Some(Task::Generate(cmd)) => generate(cmd, path, args.quantize),
+        Some(Task::Generate(cmd)) => generate(&args, cmd),
         Some(Task::Chat(_)) => todo!(),
     }
 }
