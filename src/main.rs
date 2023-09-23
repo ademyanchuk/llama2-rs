@@ -71,7 +71,15 @@ struct GenerateCmd {
     input: String,
 }
 #[derive(Parser, Debug, Clone)]
-struct ChatCmd {}
+struct ChatCmd {
+    /// system prompt (optional)
+    #[arg(long)]
+    sys_prompt: Option<String>,
+
+    /// user prompt (optional)
+    #[arg(long)]
+    user_prompt: Option<String>,
+}
 
 #[derive(Subcommand, Debug, Clone)]
 enum Task {
@@ -170,12 +178,97 @@ fn chat(args: &Args, chat_args: &ChatCmd) -> Result<()> {
     println!("Model loaded in: {} seconds", dt.as_secs_f64());
 
     // Load tokenizer and Sampler
-    let enc = Tokenizer::from_file("tokenizer.json").expect("tokenizer loading failed");
+    let tokenizer = Tokenizer::from_file("tokenizer.json").expect("tokenizer loading failed");
     let mut sampler = LogitsSampler::new(
         args.seed,
         Some(args.temperature),
         if args.p > 0.0 { Some(args.p) } else { None }, // switch top-p off if value is 0.0
     );
+
+    // Fix steps out of range for max context size
+    let steps = if args.num_steps == 0 || args.num_steps > model_args.max_seq_len {
+        model_args.max_seq_len
+    } else {
+        args.num_steps
+    };
+    let mut pos: usize = 0;
+    let mut user_turn: bool = true;
+    let mut user_idx: usize = 0;
+    let mut prompt_tokens: Vec<u32> = vec![];
+    let mut num_prompt_tokens: usize = 0;
+    let mut next: u32 = 0;
+    let mut token: u32;
+    // main loop
+    while pos < steps {
+        if user_turn {
+            let mut system_prompt = String::new();
+            let mut user_prompt = String::new();
+            if pos == 0 {
+                match &chat_args.sys_prompt {
+                    None => {
+                        println!("Enter system prompt (optional): ");
+                        io::stdin().read_line(&mut system_prompt).unwrap();
+                    }
+                    Some(sys_prompt) => {
+                        system_prompt = sys_prompt.clone();
+                    }
+                }
+            }
+            if pos == 0 && chat_args.user_prompt.is_some() {
+                user_prompt = chat_args.user_prompt.clone().unwrap().clone();
+            } else {
+                println!("User: ");
+                io::stdin().read_line(&mut user_prompt).unwrap();
+            }
+            let rendered_prompt = if pos == 0 && !system_prompt.is_empty() {
+                format!(
+                    "<<SYS>>\n{}\n<</SYS>>\n\n[INST] {} [/INST]",
+                    system_prompt, user_prompt
+                )
+            } else {
+                format!("[INST] {} [/INST]", user_prompt)
+            };
+
+            prompt_tokens = tokenizer
+                .encode(rendered_prompt, false)
+                .map_err(anyhow::Error::msg)?
+                .get_ids()
+                .to_vec();
+            num_prompt_tokens = prompt_tokens.len();
+            user_idx = 0;
+            user_turn = false;
+
+            println!("Assistant: ");
+        }
+        if user_idx < num_prompt_tokens {
+            token = prompt_tokens[user_idx];
+            user_idx += 1;
+        } else {
+            token = next;
+        }
+        // end of sentence token
+        if token == 2 {
+            user_turn = true;
+        }
+        let input = Tensor::new(&[token], &Device::Cpu)?.unsqueeze(0)?;
+        let logits = match &mut model {
+            TransformerModel::Q80Model(qmodel) => qmodel.forward(&input, pos)?,
+            TransformerModel::F32Model(f32_model) => f32_model.forward(&input, pos)?,
+        };
+        // only last time step
+        let logits = logits.i((0, logits.dim(1)? - 1))?;
+        // sample, decode, print
+        next = sampler.sample(&logits)?;
+        pos += 1;
+
+        if user_idx >= num_prompt_tokens && next != 2 {
+            print_token(next, &tokenizer);
+        }
+
+        if next == 2 {
+            println!();
+        }
+    }
 
     Ok(())
 }
@@ -264,6 +357,6 @@ fn main() -> Result<()> {
             generate(&args, &cmd)
         }
         Some(Task::Generate(cmd)) => generate(&args, cmd),
-        Some(Task::Chat(_)) => todo!(),
+        Some(Task::Chat(chat_args)) => chat(&args, chat_args),
     }
 }
