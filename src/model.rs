@@ -24,6 +24,7 @@ pub struct ModelArgs {
     pub norm_eps: f32,
     pub max_seq_len: usize,
     pub shared_classifier: bool,
+    pub version: i32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +39,7 @@ impl ModelArgs {
         norm_eps: f32,
         max_seq_len: usize,
         shared_classifier: bool,
+        version: i32,
     ) -> ModelArgs {
         ModelArgs {
             dim,
@@ -49,6 +51,7 @@ impl ModelArgs {
             norm_eps,
             max_seq_len,
             shared_classifier,
+            version,
         }
     }
 }
@@ -66,6 +69,7 @@ impl Default for ModelArgs {
             norm_eps: 1e-5,
             max_seq_len: 2048,
             shared_classifier: true,
+            version: 0,
         }
     }
 }
@@ -79,6 +83,7 @@ pub struct ModelArgsBuilder {
     norm_eps: Option<f32>,
     max_seq_len: Option<usize>,
     shared_classifier: Option<bool>,
+    version: Option<i32>,
 }
 #[allow(clippy::new_without_default)]
 impl ModelArgsBuilder {
@@ -93,6 +98,7 @@ impl ModelArgsBuilder {
             norm_eps: None,
             max_seq_len: None,
             shared_classifier: None,
+            version: None,
         }
     }
 
@@ -140,6 +146,10 @@ impl ModelArgsBuilder {
         self.shared_classifier = Some(shared_classifier);
         self
     }
+    pub fn version(mut self, version: i32) -> Self {
+        self.version = Some(version);
+        self
+    }
 
     pub fn build(self) -> ModelArgs {
         ModelArgs {
@@ -152,6 +162,7 @@ impl ModelArgsBuilder {
             norm_eps: self.norm_eps.unwrap_or(1e-5),
             max_seq_len: self.max_seq_len.unwrap_or(2048),
             shared_classifier: self.shared_classifier.unwrap_or(true),
+            version: self.version.unwrap_or(0),
         }
     }
 }
@@ -1454,7 +1465,7 @@ mod tests {
     }
     #[test]
     fn test_attention() {
-        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32, true);
+        let args = ModelArgs::new(8, 12, 2, None, 256, 256, 1e-4, 32, true, 0);
         let mut weights_data = HashMap::new();
         weights_data.insert("wq", ATT_WQ.to_vec());
         weights_data.insert("wk", ATT_WK.to_vec());
