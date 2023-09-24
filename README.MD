@@ -9,6 +9,7 @@ The project is inspired by famous llama2.c by Andrej Karpathy. Make sure to go a
 - Command-line interface for setting various parameters like temperature, top-p, and number of tokens to generate.
 - Flexible subcommands for different tasks (`generate`, `chat`).
 - Quantize model weights on load (would require a machine with 32GB of RAM available to load and quantize weights of Llama-2-7b model, but generating process will be using only about 8GB).
+- Note, if you use my [fork](https://github.com/ademyanchuk/llama2.c) of llama2.c, you can export the model into v3 version, just run the same export command with `--version 3` flag, and you'll be able to export model into quantized version directly, and load it faster and using less RAM later.
 
 ## Dependencies:
 
@@ -28,21 +29,25 @@ This project depends on several external libraries including:
    - Make sure to have .bin type of model as mentioned in the introduction (exported v0 - for f32 weights, exported v1 - for quantized weights, the project performs quantization on model load).
    - Run `cargo build --release` to compile the program.
 
-2. **Generate Text**:
+2. **Common CLI arguments and Generate Text**:
 
    Generate text based on a given prompt and other parameters:
-   `./target/release/your_binary_name model_v1.bin -q generate --input "Your prompt here" --temperature 1.0 --p 0.9 --num-steps 256`
+   `./target/release/your_binary_name model_v1.bin --temperature 1.0 --p 0.9 --num-steps 256 -q generate --input "Your prompt here"`
 
-   Parameters:
+   Common model Parameters:
 - path to model as positional argument.
-- `--quantized`: bool flag, if weights to be quantized (works only with v1 exported model).
-- `generate|chat`: task to perform.
-- `--input`: The input prompt to start the text generation.
 - `--temperature`: Adjusts the randomness of predictions. Default is `1.0`.
 - `--p`: The top-p (nucleus) sampling value, in range [0,1]. Default is `0.9`.
 - `--num-steps`: Number of steps to run for the generation. Default is `256`.
+- `--quantized`: bool flag, if weights to be quantized (works only with v1 and v3 exported model).
 
-1. **Generate Example**:
+- `generate|chat`: task to perform.
+- `generate` take as optional argument:
+    - `--input`: The input prompt to start the text generation.
+
+
+3. **Generate Example**:
+
    `cargo run --release -- stories110M.bin generate -i "One day, Alex went to"`
     
     One day, Alex went to the park with his mom. He saw a beautiful black bird perched on a tree branch. 
@@ -52,13 +57,16 @@ This project depends on several external libraries including:
     The bird was so graceful, and it danced around the branch as Alex clapped his hands. After Alex was done clapping, the bird flew away again. Alex smiled and said, "That was so much fun!"
     186 tokens generated (41.93 token/s)
 
-2. **Chat**:
+4. **Chat**:
 
-This functionality is under development.
+Major goal of chat functionality is to give a way to chat with meta llama-2 model (most likely the chat version).
+This functionality is not yet properly tested, consider it as a proof of concept, not a stable feature
+- `chat` takes as optional arguments:
+- `--sys-prompt`: system prompt
+- `--user-prompt`: first user message to the assistant
 
 ## Limitations and Known Issues:
-- The `chat` subcommand is not yet implemented.
-- Tokenizer path is currently hardcoded.
+- This implementation uses hugging face tokenizers crate, and `tokenizer.json` is currently used as the only tokenizer. The project doesn't support training a custom tokenizer.
 
 ## Contribution:
 Feel free to contribute to the repository by submitting pull requests or by reporting issues.
