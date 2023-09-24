@@ -268,7 +268,6 @@ fn chat(args: &Args, chat_args: &ChatCmd) -> Result<()> {
         if next == 2 {
             println!();
         }
-
     }
 
     Ok(())
