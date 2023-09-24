@@ -1,5 +1,7 @@
+use anyhow::bail;
+use candle_core::quantized::ggml_file::qtensor_from_ggml;
 use candle_core::quantized::k_quants::BlockQ8_0;
-use candle_core::quantized::{QMatMul, QTensor};
+use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::ops::{silu, softmax};
 use candle_nn::{Embedding, LayerNorm, Module};
@@ -18,7 +20,7 @@ use crate::{
 /// and convert to QTensor appropriate weights
 /// version1_export here https://github.com/karpathy/llama2.c/blob/master/export.py
 
-// Model args from reader, V1 (llama2.c repo)
+// Model args from reader, V1 and V3 (llama2.c repo)
 impl ModelArgs {
     pub fn from_reader_v1<R: io::Read + io::Seek>(r: &mut R) -> anyhow::Result<ModelArgs> {
         // 1. Check magic: should be uint32 of "ak42" in ASCII
@@ -30,7 +32,7 @@ impl ModelArgs {
         }
         // 2. read version, must be version 1
         let version = read_i32(r)?;
-        if version != 1 {
+        if ![1, 3].contains(&version) {
             anyhow::bail!("export file version must be 1");
         }
         // 3. read model arguments
@@ -58,6 +60,7 @@ impl ModelArgs {
             .vocab_size(vocab_size)
             .max_seq_len(max_seq_len)
             .shared_classifier(shared_classifier)
+            .version(version)
             .build())
     }
 }
@@ -69,6 +72,17 @@ pub struct TransformerWeights {
 }
 impl TransformerWeights {
     pub fn from_reader<R: io::Read>(
+        r: &mut R,
+        args: &ModelArgs,
+        device: &Device,
+    ) -> anyhow::Result<TransformerWeights> {
+        match args.version {
+            1 => Self::from_reader_v1(r, args, device),
+            3 => Self::from_reader_v3(r, args, device),
+            _ => bail!("Trying to load quantized weights from unsupported export version, must be v1 or v3")
+        }
+    }
+    fn from_reader_v1<R: io::Read>(
         r: &mut R,
         args: &ModelArgs,
         device: &Device,
@@ -163,6 +177,85 @@ impl TransformerWeights {
             f32_weights,
         })
     }
+
+    fn from_reader_v3<R: io::Read>(
+        r: &mut R,
+        args: &ModelArgs,
+        device: &Device,
+    ) -> anyhow::Result<TransformerWeights> {
+        // initialize hashmaps
+        let mut q8_weights: HashMap<String, QTensor> = HashMap::new();
+        let mut f32_weights: HashMap<String, Tensor> = HashMap::new();
+        // all f32 weights were written first (norm layers attn, ffd, final norm)
+        let attn_norm = read_tensor(r, (args.n_layers, args.dim), device)?;
+        let ffd_norm = read_tensor(r, (args.n_layers, args.dim), device)?;
+        for layer in 0..args.n_layers {
+            f32_weights.insert(format!("layers.{layer}.attn_norm"), attn_norm.i(layer)?);
+            f32_weights.insert(format!("layers.{layer}.ffd_norm"), ffd_norm.i(layer)?);
+        }
+        let final_norm = read_tensor(r, args.dim, device)?;
+        f32_weights.insert("final_norm".to_string(), final_norm);
+
+        // next goes quantized layers
+        // we need to de-quantize embedding layer to use in the model!
+        let embed = read_q80_tensor(r, vec![args.vocab_size, args.dim])?;
+
+        // linear layers which supposed to be quantized
+        // careful with wk and wv, in case n_kv_heads != n_heads we need right shape
+        let n_heads = args.n_heads;
+        let n_kv_heads = args.n_kv_heads.unwrap_or(n_heads);
+        let head_dim = args.dim / n_heads; // note: dim = head_dim * n_heads
+                                           // read in the rest of blocks' weights
+                                           // attention weights first
+
+        // assume? out_dim, in_dim as in linear layers for now
+        for layer in 0..args.n_layers {
+            let wq = read_q80_tensor(r, vec![args.dim, args.dim])?;
+            q8_weights.insert(format!("layers.{layer}.wq"), wq);
+        }
+        for layer in 0..args.n_layers {
+            let wk = read_q80_tensor(r, vec![n_kv_heads * head_dim, args.dim])?;
+            q8_weights.insert(format!("layers.{layer}.wk"), wk);
+        }
+        for layer in 0..args.n_layers {
+            let wv = read_q80_tensor(r, vec![n_kv_heads * head_dim, args.dim])?;
+            q8_weights.insert(format!("layers.{layer}.wv"), wv);
+        }
+        for layer in 0..args.n_layers {
+            let wo = read_q80_tensor(r, vec![args.dim, args.dim])?;
+            q8_weights.insert(format!("layers.{layer}.wo"), wo);
+        }
+        // feed forward weights
+        for layer in 0..args.n_layers {
+            let w1 = read_q80_tensor(r, vec![args.hidden_dim, args.dim])?;
+            q8_weights.insert(format!("layers.{layer}.w1"), w1);
+        }
+        for layer in 0..args.n_layers {
+            let w2 = read_q80_tensor(r, vec![args.dim, args.hidden_dim])?;
+            q8_weights.insert(format!("layers.{layer}.w2"), w2);
+        }
+        for layer in 0..args.n_layers {
+            let w3 = read_q80_tensor(r, vec![args.hidden_dim, args.dim])?;
+            q8_weights.insert(format!("layers.{layer}.w3"), w3);
+        }
+
+        let embed_f32 = embed.dequantize(device)?;
+        // check if not shared classifier and read head of not
+        let lm_head: QTensor = if !args.shared_classifier {
+            read_q80_tensor(r, vec![args.vocab_size, args.dim])?
+        } else {
+            embed
+        };
+        // postpone inserting in case we need this tensor
+        f32_weights.insert("embed".to_string(), embed_f32);
+        q8_weights.insert("lm_head".to_string(), lm_head);
+
+        anyhow::Ok(TransformerWeights {
+            q8_weights,
+            f32_weights,
+        })
+    }
+
     pub fn remove_q8(&mut self, name: &str) -> Result<QTensor> {
         match self.q8_weights.remove(name) {
             None => candle_core::bail!("cannot find tensor with name '{name}'"),
@@ -175,6 +268,15 @@ impl TransformerWeights {
             Some(weight) => Ok(weight),
         }
     }
+}
+
+fn read_q80_tensor<R: io::Read>(r: &mut R, dims: Vec<usize>) -> Result<QTensor> {
+    let dtype = GgmlDType::Q8_0;
+    let numel = dims.iter().product::<usize>();
+    let size_in_bytes = numel * dtype.type_size() / dtype.blck_size();
+    let mut raw_data = vec![0u8; size_in_bytes];
+    r.read_exact(&mut raw_data)?;
+    qtensor_from_ggml(dtype, &raw_data, dims)
 }
 
 // Model
