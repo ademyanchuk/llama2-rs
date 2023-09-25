@@ -561,11 +561,23 @@ mod tests {
             .unwrap()
             .join("tests")
             .join("data")
-            .join("test_qmodel.bin");
+            .join("test_qmodel.bin"); // v1 test model
         let mut file = File::open(path)?;
         let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
         let _ = TransformerWeights::from_reader(&mut file, &args, &Device::Cpu)?;
         assert!(true);
+        Ok(())
+    }
+    #[test]
+    fn test_read_and_quantize_weights_v3() -> anyhow::Result<()> {
+        let path = env::current_dir()
+            .unwrap()
+            .join("tests")
+            .join("data")
+            .join("test_bq80_model.bin"); // v3 test model
+        let mut file = File::open(path)?;
+        let args = ModelArgs::from_reader_v1(&mut file).expect("failed to read header");
+        assert!(TransformerWeights::from_reader(&mut file, &args, &Device::Cpu).is_ok());
         Ok(())
     }
     #[test]
