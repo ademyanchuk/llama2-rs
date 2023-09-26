@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Ok, Result};
+use anyhow::{Context, Ok, Result};
 use clap::{Parser, Subcommand};
 
 use candle_core::{Device, IndexOp, Tensor};
@@ -50,22 +50,6 @@ fn validate_path(val: &str) -> Result<PathBuf, String> {
 }
 #[derive(Parser, Debug, Clone)]
 struct GenerateCmd {
-    /// temperature in [0,inf], 1.0 = no change, < 1.0 = less random, > 1.0 = more random
-    #[arg(long, short, default_value_t = 1.0, value_parser = temp_in_range)]
-    temperature: f64,
-
-    /// p value in top-p (nucleus) sampling in [0,1]
-    #[arg(short, default_value_t = 0.9, value_parser = topp_in_range)]
-    p: f64,
-
-    /// number of steps to run for, default 256. 0 = max_seq_len
-    #[arg(long, short, default_value_t = 256)]
-    num_steps: usize,
-
-    /// random seed for reproducible randomness
-    #[arg(long, short, default_value_t = 13)]
-    seed: u64,
-
     /// input prompt
     #[arg(long, short, default_value = "")]
     input: String,
@@ -119,11 +103,14 @@ pub struct Args {
     mode: Option<Task>,
 }
 
-fn load_args<R: io::Read + io::Seek>(r: &mut R, quantize: bool) -> ModelArgs {
+fn load_args<R: io::Read + io::Seek>(r: &mut R, quantize: bool) -> Result<ModelArgs> {
     if quantize {
-        ModelArgs::from_reader_v1(r).expect("Make sure to provide v1 exported model!")
+        ModelArgs::from_reader_v1(r).with_context(|| {
+            "Model args validation error: make sure to provide v1 or v3 exported model!"
+        })
     } else {
-        ModelArgs::from_reader(r).expect("Make sure to provide v0 exported model!")
+        ModelArgs::from_reader(r)
+            .with_context(|| "Model args validation error: make sure to provide v0 exported model!")
     }
 }
 fn load_model<R: io::Read>(
@@ -131,6 +118,8 @@ fn load_model<R: io::Read>(
     args: &ModelArgs,
     quantize: bool,
 ) -> Result<TransformerModel> {
+    // we want to validate model args are in some reasonable ranges
+    args.validate().with_context(|| "Model args validation error, most likely the file provided isn't the model weights binary file!")?;
     let device = &Device::Cpu;
     if quantize {
         let mut weights = qmodel::TransformerWeights::from_reader(r, args, device)?;
@@ -173,7 +162,7 @@ fn chat(args: &Args, chat_args: &ChatCmd) -> Result<()> {
     // Load the model
     let mut f = File::open(args.path.clone())?;
     let start = Instant::now();
-    let model_args = load_args(&mut f, args.quantize);
+    let model_args = load_args(&mut f, args.quantize)?;
     let mut model = load_model(&mut f, &model_args, args.quantize)?;
     let dt = start.elapsed();
     println!("Model loaded in: {} seconds", dt.as_secs_f64());
@@ -281,7 +270,7 @@ fn generate(args: &Args, gen_args: &GenerateCmd) -> Result<()> {
     // Load the model
     let mut f = File::open(args.path.clone())?;
     let start = Instant::now();
-    let model_args = load_args(&mut f, args.quantize);
+    let model_args = load_args(&mut f, args.quantize)?;
     let mut model = load_model(&mut f, &model_args, args.quantize)?;
     let dt = start.elapsed();
     println!("Model loaded in: {} seconds", dt.as_secs_f64());
@@ -354,7 +343,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     match &args.mode {
         None => {
-            let cmd = GenerateCmd::parse();
+            let cmd = GenerateCmd {
+                input: "".to_string(),
+            };
             generate(&args, &cmd)
         }
         Some(Task::Generate(cmd)) => generate(&args, cmd),
