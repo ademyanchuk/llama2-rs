@@ -2,10 +2,14 @@ use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
+fn get_exe_path() -> String {
+    std::env::var("EXE_PATH").unwrap_or("target/debug/llama2-rs".to_string())
+}
+
 #[test]
 fn test_non_existing_file() {
     // Path to your executable. Adjust if needed.
-    let exe_path = "target/debug/llama2-rs";
+    let exe_path = get_exe_path();
 
     // Run the application with a non-existing file path as argument.
     let output = Command::new(exe_path)
@@ -32,7 +36,7 @@ fn test_invalid_model_file() {
     writeln!(tmp_file, "This is not a valid model.").expect("Unable to write to temporary file");
 
     // Path to your release executable. Adjust if needed.
-    let exe_path = "target/debug/llama2-rs";
+    let exe_path = get_exe_path();
 
     // Run the application with the temporary file path as argument.
     let output = Command::new(exe_path)
@@ -57,7 +61,7 @@ fn test_invalid_qmodel_file() {
     writeln!(tmp_file, "This is not a valid model.").expect("Unable to write to temporary file");
 
     // Path to your release executable. Adjust if needed.
-    let exe_path = "target/debug/llama2-rs";
+    let exe_path = get_exe_path();
 
     // Run the application with the temporary file path as argument.
     let output = Command::new(exe_path)

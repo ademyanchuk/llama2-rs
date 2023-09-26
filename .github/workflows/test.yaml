@@ -61,6 +61,8 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     name: ubuntu / stable / coverage
+    env:
+      EXE_PATH: target/llvm-cov-target/debug/llama2-rs
     steps:
       - uses: actions/checkout@v4
         with:
