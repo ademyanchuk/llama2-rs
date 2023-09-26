@@ -1,6 +1,5 @@
 # from https://github.com/jonhoo/rust-ci-conf/blob/main/.github/workflows/test.yml
 # TODO: think about minimal versions (make dependencies more permissive)
-# TODO: add code coverage
 permissions:
   contents: read
 on:
