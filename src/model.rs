@@ -57,30 +57,30 @@ impl ModelArgs {
     // This is some simple validator to make sure we read some reasonable values into model args
     // for the model files exported with v0, as they don't have magic to check for.
     pub fn validate(&self) -> Result<()> {
-        if self.dim <= 0 || self.dim > 10000 {
+        if self.dim == 0 || self.dim > 10000 {
             bail!("Invalid dim value: must be between 1 and 10000.");
         }
 
-        if self.n_layers <= 0 || self.n_layers > 100 {
+        if self.n_layers == 0 || self.n_layers > 100 {
             bail!("Invalid n_layers value: must be between 1 and 100.");
         }
 
-        if self.n_heads <= 0 || self.n_heads > 100 {
+        if self.n_heads == 0 || self.n_heads > 100 {
             bail!("Invalid n_heads value: must be between 1 and 100.");
         }
 
         // Similar check for n_kv_heads if it's Some
         if let Some(n_kv) = self.n_kv_heads {
-            if n_kv <= 0 || n_kv > 100 {
+            if n_kv == 0 || n_kv > 100 {
                 bail!("Invalid n_kv_heads value: must be between 1 and 100.");
             }
         }
 
-        if self.vocab_size <= 0 || self.vocab_size > 100000 {
+        if self.vocab_size == 0 || self.vocab_size > 100000 {
             bail!("Invalid vocab_size value: must be between 1 and 100000.");
         }
 
-        if self.hidden_dim <= 0 || self.hidden_dim > 10000 {
+        if self.hidden_dim == 0 || self.hidden_dim > 10000 {
             bail!("Invalid hidden_dim value: must be between 1 and 10000.");
         }
 
@@ -88,7 +88,7 @@ impl ModelArgs {
             bail!("Invalid norm_eps value: must be between 0.0 (exclusive) and 1.0.");
         }
 
-        if self.max_seq_len <= 0 || self.max_seq_len > 10000 {
+        if self.max_seq_len == 0 || self.max_seq_len > 10000 {
             bail!("Invalid max_seq_len value: must be between 1 and 10000.");
         }
 
