@@ -119,7 +119,7 @@ fn load_model<R: io::Read>(
     quantize: bool,
 ) -> Result<TransformerModel> {
     // we want to validate model args are in some reasonable ranges
-    args.validate().with_context(|| "Model args validation error, most likely the file provided isn't the model weights binary file!")?;
+    args.validate().with_context(|| "Model args validation error, most likely the file provided isn't the model weights binary file or supposed to be used under --quantized flag!")?;
     let device = &Device::Cpu;
     if quantize {
         let mut weights = qmodel::TransformerWeights::from_reader(r, args, device)?;
