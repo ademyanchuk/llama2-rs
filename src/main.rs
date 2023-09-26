@@ -91,8 +91,9 @@ enum Task {
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// model.bin path, currently you need to provide v0 model for f32 weights,
-    /// and v1 model for quantized weights [we quantize them on load]
-    #[arg(value_parser = validate_path)]
+    /// v1 model for quantized weights [we quantize them on load],
+    /// v3 model [exported quantized best in terms of RAM usage]
+    #[arg(value_name = "MODEL_PATH", value_parser = validate_path)]
     path: PathBuf,
     /// if you want to quantize model weights [model must be exported via v1 export]
     #[arg(long, short, default_value = "false")]
