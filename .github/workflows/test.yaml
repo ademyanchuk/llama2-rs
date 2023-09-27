@@ -32,6 +32,13 @@ jobs:
       - name: Download model from Hugging Face
         if: steps.cache.outputs.cache-hit != 'true'
         run: curl -Lo stories15M_BlockQ8.bin https://huggingface.co/ademyanchuk/tinyllama-quantized/resolve/main/stories15M_BlockQ8.bin
+      # Upload artifact
+      - name: Upload model as artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: stories15M_BlockQ8.bin
+          path: ./stories15M_BlockQ8.bin
+
   required:
     runs-on: ubuntu-latest
     name: ubuntu / stable
@@ -40,6 +47,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Download model artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: stories15M_BlockQ8.bin
+          path: ./
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - name: cargo generate-lockfile
@@ -70,6 +82,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Download model artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: stories15M_BlockQ8.bin
+          path: ./
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - name: cargo generate-lockfile
@@ -90,6 +107,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Download model artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: stories15M_BlockQ8.bin
+          path: ./
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
         with:
