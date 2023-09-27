@@ -20,20 +20,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Obtain latest commit hash from Hugging Face Hub
-      - name: Get commit hash from Hugging Face Hub
-        id: get_commit
-        run: |
-          COMMIT_HASH=$(curl -s "https://huggingface.co/api/models/ademyanchuk/tinyllama-quantized" | jq -r ".commit")
-          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
-
       # Attempt to restore from cache
       - name: Cache model
         id: cache
         uses: actions/cache@v3
         with:
           path: ./stories15M_BlockQ8.bin
-          key: model-${{ env.COMMIT_HASH }}
+          key: model-static-key
 
       # Download model only if not present in cache
       - name: Download model from Hugging Face
