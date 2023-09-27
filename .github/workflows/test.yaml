@@ -12,15 +12,41 @@ concurrency:
   cancel-in-progress: true
 name: test
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Obtain latest commit hash from Hugging Face Hub
+      - name: Get commit hash from Hugging Face Hub
+        id: get_commit
+        run: |
+          COMMIT_HASH=$(curl -s "https://huggingface.co/api/models/ademyanchuk/tinyllama-quantized" | jq -r ".commit")
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+
+      # Attempt to restore from cache
+      - name: Cache model
+        id: cache
+        uses: actions/cache@v3
+        with:
+          path: ./stories15M_BlockQ8.bin
+          key: model-${{ env.COMMIT_HASH }}
+
+      # Download model only if not present in cache
+      - name: Download model from Hugging Face
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: curl -Lo stories15M_BlockQ8.bin https://huggingface.co/ademyanchuk/tinyllama-quantized/resolve/main/stories15M_BlockQ8.bin
   required:
     runs-on: ubuntu-latest
     name: ubuntu / stable
+    needs: setup
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Download model from Hugging Face Hub
-        run: curl -Lo stories15M_BlockQ8.bin https://huggingface.co/ademyanchuk/tinyllama-quantized/resolve/main/stories15M_BlockQ8.bin
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - name: cargo generate-lockfile
@@ -36,6 +62,7 @@ jobs:
   os-check:
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }} / stable
+    needs: setup
     strategy:
       fail-fast: false
       matrix:
@@ -50,8 +77,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Download model from Hugging Face Hub
-        run: curl -Lo stories15M_BlockQ8.bin https://huggingface.co/ademyanchuk/tinyllama-quantized/resolve/main/stories15M_BlockQ8.bin
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - name: cargo generate-lockfile
@@ -65,14 +90,13 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     name: ubuntu / stable / coverage
+    needs: setup
     env:
       EXE_PATH: target/llvm-cov-target/debug/llama2-rs
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Download model from Hugging Face Hub
-        run: curl -Lo stories15M_BlockQ8.bin https://huggingface.co/ademyanchuk/tinyllama-quantized/resolve/main/stories15M_BlockQ8.bin
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
         with:
