@@ -80,8 +80,8 @@ impl ModelArgs {
             bail!("Invalid vocab_size value: must be between 1 and 100000.");
         }
 
-        if self.hidden_dim == 0 || self.hidden_dim > 10000 {
-            bail!("Invalid hidden_dim value: must be between 1 and 10000.");
+        if self.hidden_dim == 0 || self.hidden_dim > 50000 {
+            bail!("Invalid hidden_dim value: must be between 1 and 50000.");
         }
 
         if self.norm_eps <= 0.0 || self.norm_eps > 1.0 {

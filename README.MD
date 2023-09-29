@@ -66,6 +66,7 @@ This functionality is not yet properly tested, consider it as a proof of concept
 - `--user-prompt`: first user message to the assistant
 
 ## Limitations and Known Issues:
+- Chat functionality isn't working properly yet, TODO!
 - This implementation uses hugging face tokenizers crate, and `tokenizer.json` is currently used as the only tokenizer. The project doesn't support training a custom tokenizer.
 
 ## Contribution:
