@@ -59,14 +59,28 @@ This project depends on several external libraries including:
 
 4. **Chat**:
 
-Major goal of chat functionality is to give a way to chat with meta llama-2 model (most likely the chat version).
+Major goal of chat functionality is to give a way to chat with meta llama-2 model.
+Consider downloading llama2-7b-chat files (e.g. from hugging face hub), you'll need to go through access procedure required by Meta. Once you have files locally, run:
+
+```python export.py llama2_7b_chat_v3.bin --version 3 --meta-llama path/to/llama_chat_folder```
+
+to quantize model weights.
+
+Make sure you run this command from my [fork](https://github.com/ademyanchuk/llama2.c) of llama2.c.
+If you don't have it locally, just clone the repo and cd into it. Do not forget to put quantized weights `llama2_7b_chat_v3.bin` file to the root folder of this rust project.
+
+To chat, run:
+
+```cargo run --release -- .\llama2_7b_chat_v3.bin -n 0 -q chat```
+
 This functionality is not yet properly tested, consider it as a proof of concept, not a stable feature
-- `chat` takes as optional arguments:
+
+`chat` takes as optional arguments:
 - `--sys-prompt`: system prompt
 - `--user-prompt`: first user message to the assistant
 
 ## Limitations and Known Issues:
-- Chat functionality isn't working properly yet, TODO!
+- Chat functionality will work properly only with chat version of llama2 (e.g. llama2-7b-chat).
 - This implementation uses hugging face tokenizers crate, and `tokenizer.json` is currently used as the only tokenizer. The project doesn't support training a custom tokenizer.
 
 ## Contribution:
